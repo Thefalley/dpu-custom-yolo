@@ -1,0 +1,39 @@
+{
+  "model": "YOLOv4-tiny",
+  "input_size": [
+    416,
+    416,
+    3
+  ],
+  "activation": "LeakyReLU",
+  "layer_count": {
+    "convolutional": 21,
+    "route": 11,
+    "maxpool": 3,
+    "yolo": 2,
+    "upsample": 1
+  },
+  "activation_count": {
+    "leaky": 19,
+    "linear": 2
+  },
+  "total_macs": 3453938176,
+  "total_params": 6062304,
+  "primitives_needed": [
+    "Conv 3x3 (stride 1, 2)",
+    "Conv 1x1",
+    "LeakyReLU (alpha=0.1)",
+    "BatchNorm (fused)",
+    "MaxPool 2x2",
+    "Route/Concat",
+    "Upsample 2x"
+  ],
+  "not_needed": [
+    "SiLU/Swish",
+    "Mish",
+    "Depthwise Conv",
+    "Large kernels",
+    "Dilated Conv",
+    "Transposed Conv"
+  ]
+}
