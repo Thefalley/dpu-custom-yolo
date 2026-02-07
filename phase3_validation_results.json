@@ -1,0 +1,10 @@
+{
+  "MAC": true,
+  "LeakyReLU": true,
+  "Conv3x3": true,
+  "MaxPool": true,
+  "Requantize": true,
+  "FullLayer": true,
+  "YOLO_Simulation": true,
+  "all_pass": true
+}
