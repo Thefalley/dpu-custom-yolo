@@ -51,6 +51,9 @@ Thumbs.db
 *.fst
 *.log
 
+# Local path to OSS CAD / Icarus (copy .oss_cad_path.example to .oss_cad_path and edit)
+.oss_cad_path
+
 # Build outputs
 *.o
 *.a
