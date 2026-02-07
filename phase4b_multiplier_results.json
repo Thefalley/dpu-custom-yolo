@@ -1,0 +1,157 @@
+{
+  "phase": "4b",
+  "target": {
+    "name": "ZedBoard (Zynq-7020)",
+    "dsp48e1": 220,
+    "luts": 53200,
+    "ffs": 106400,
+    "bram_36kb": 140,
+    "bram_kb": 630,
+    "max_freq_mhz": 200
+  },
+  "multiplier_options": [
+    {
+      "name": "DSP48E1 (Native)",
+      "type": "dsp",
+      "dsps_per_mult": 1.0,
+      "luts_per_mult": 20,
+      "latency": 3,
+      "throughput": 1.0,
+      "max_freq": 200
+    },
+    {
+      "name": "DSP48E1 (Packed 2x)",
+      "type": "dsp",
+      "dsps_per_mult": 0.5,
+      "luts_per_mult": 40,
+      "latency": 4,
+      "throughput": 1.0,
+      "max_freq": 180
+    },
+    {
+      "name": "LUT Array (Parallel)",
+      "type": "lut",
+      "dsps_per_mult": 0,
+      "luts_per_mult": 64,
+      "latency": 4,
+      "throughput": 1.0,
+      "max_freq": 150
+    },
+    {
+      "name": "LUT Serial (Shift-Add)",
+      "type": "lut",
+      "dsps_per_mult": 0,
+      "luts_per_mult": 24,
+      "latency": 8,
+      "throughput": 0.125,
+      "max_freq": 200
+    },
+    {
+      "name": "LUT Booth Radix-4",
+      "type": "lut",
+      "dsps_per_mult": 0,
+      "luts_per_mult": 40,
+      "latency": 4,
+      "throughput": 0.25,
+      "max_freq": 180
+    },
+    {
+      "name": "LUT Pipelined (2-stage)",
+      "type": "lut",
+      "dsps_per_mult": 0,
+      "luts_per_mult": 48,
+      "latency": 2,
+      "throughput": 1.0,
+      "max_freq": 160
+    },
+    {
+      "name": "Hybrid 50% DSP / 50% LUT",
+      "type": "hybrid",
+      "dsps_per_mult": 0.5,
+      "luts_per_mult": 34,
+      "latency": 3,
+      "throughput": 1.0,
+      "max_freq": 180
+    },
+    {
+      "name": "Hybrid 25% DSP / 75% LUT",
+      "type": "hybrid",
+      "dsps_per_mult": 0.25,
+      "luts_per_mult": 41,
+      "latency": 3,
+      "throughput": 1.0,
+      "max_freq": 170
+    }
+  ],
+  "performance_results": [
+    {
+      "name": "DSP48E1 (Native) (12x12)",
+      "multiplier": "DSP48E1 (Native)",
+      "array_size": "12x12",
+      "eff_macs": 144.0,
+      "freq_mhz": 200,
+      "cycles": 26384249,
+      "time_ms": 131.92124977777777,
+      "fps": 7.580279914604407,
+      "dsps": 144,
+      "luts": 4056,
+      "tops": 0.0288
+    },
+    {
+      "name": "DSP48E1 (Packed 2x) (20x20)",
+      "multiplier": "DSP48E1 (Packed 2x)",
+      "array_size": "20x20",
+      "eff_macs": 400.0,
+      "freq_mhz": 180,
+      "cycles": 9498329,
+      "time_ms": 52.76849991111112,
+      "fps": 18.950699786511013,
+      "dsps": 200,
+      "luts": 20200,
+      "tops": 0.072
+    },
+    {
+      "name": "LUT Pipelined (2-stage) (24x24)",
+      "multiplier": "LUT Pipelined (2-stage)",
+      "array_size": "24x24",
+      "eff_macs": 576.0,
+      "freq_mhz": 160,
+      "cycles": 6596062,
+      "time_ms": 41.225390555555556,
+      "fps": 24.256895726734104,
+      "dsps": 0,
+      "luts": 34377,
+      "tops": 0.09216
+    },
+    {
+      "name": "LUT Array (Parallel) (20x20)",
+      "multiplier": "LUT Array (Parallel)",
+      "array_size": "20x20",
+      "eff_macs": 400.0,
+      "freq_mhz": 150,
+      "cycles": 9498329,
+      "time_ms": 63.32219989333335,
+      "fps": 15.792249822092511,
+      "dsps": 0,
+      "luts": 31720,
+      "tops": 0.06
+    },
+    {
+      "name": "Hybrid 50% DSP / 50% LUT (20x20)",
+      "multiplier": "Hybrid 50% DSP / 50% LUT",
+      "array_size": "20x20",
+      "eff_macs": 400.0,
+      "freq_mhz": 180,
+      "cycles": 9498329,
+      "time_ms": 52.76849991111112,
+      "fps": 18.950699786511013,
+      "dsps": 200,
+      "luts": 17320,
+      "tops": 0.072
+    }
+  ],
+  "recommendations": {
+    "fpga_deployment": "DSP-based for max performance",
+    "asic_path": "LUT-based (pipelined) for portability"
+  }
+}
