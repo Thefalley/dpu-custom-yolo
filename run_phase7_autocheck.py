@@ -101,9 +101,10 @@ def run_rtl_test(info):
 
     out = (result.stdout or "") + (result.stderr or "")
     # Simulator may return 0 even when TB reports FAIL (TB uses $finish)
-    if "RESULT: ALL PASS" in out:
+    # TB prints "RESULT:  ALL PASS" (possible extra space)
+    if "RESULT:" in out and "ALL PASS" in out and "SOME FAIL" not in out:
         return True, out
-    if "RESULT: SOME FAIL" in out:
+    if "RESULT: SOME FAIL" in out or "SOME FAIL" in out:
         return False, out
     if result.returncode != 0:
         return False, out
