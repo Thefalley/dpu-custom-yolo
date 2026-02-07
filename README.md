@@ -13,7 +13,7 @@ Custom DPU (Deep Learning Processing Unit) architecture designed and validated f
 | **3** | Python functional DPU model | **DONE** |
 | **4** | Software benchmarking & architecture exploration | **DONE** ? MEDIUM 32?32 selected |
 | **4b** | Multiplier exploration (DSP vs shift-and-add) | **DONE** ? documented |
-| **5** | Hardware architecture definition | Pending |
+| **5** | Hardware architecture definition | **DONE** |
 | **6** | RTL implementation (Verilog) | Pending |
 | **7** | Verification (AutoCheck testbench) | Pending |
 
@@ -32,6 +32,7 @@ docs/                    # Phase write-ups and analysis
   PHASE3_FUNCTIONAL_MODEL.md
   PHASE4_ARCHITECTURE_EXPLORATION.md
   PHASE4B_MULTIPLIER_EXPLORATION.md   # DSP vs LUT (shift-add)
+  PHASE5_HARDWARE_ARCHITECTURE.md     # Datapath, control, memory, interfaces
 phase1_yolov4tiny_analysis.py         # YOLOv4-tiny layer analysis
 phase2_dpu_primitives.py
 phase3_dpu_functional_model.py
