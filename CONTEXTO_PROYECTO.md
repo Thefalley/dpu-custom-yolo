@@ -52,6 +52,8 @@ dpu-custom-yolo/
 │   ├── PHASE5_HARDWARE_ARCHITECTURE.md
 │   ├── PHASE6_RTL_IMPLEMENTATION.md
 │   ├── PHASE7_VERIFICATION.md    # AutoCheck RTL vs Python
+│   ├── IMAGE_TO_DETECTION_PLAN.md # Plan imagen → detección SW → simulación HW
+│   ├── REPORTE_VALIDACION_Y_SIGUIENTES_PASOS.md  # Handover: qué está validado, qué falta (imagen + sincronizado)
 │   └── SIMULACION_RTL.md         # Cómo simular RTL (iverilog vs EDA Playground)
 ├── rtl/
 │   ├── dpu/
@@ -74,6 +76,10 @@ dpu-custom-yolo/
 ├── phase4b_multiplier_exploration.py
 ├── run_dpu_sim.ps1               # Script simulación RTL (usa *_iv.sv con iverilog)
 ├── run_phase7_autocheck.py       # Phase 7: verificación RTL vs Python (un comando)
+├── run_image_to_detection.py     # Imagen → detector SW → tensor INT8 → capa 0 Python; guarda entrada para RTL
+├── run_layer0_patch_check.py    # Un píxel capa 0: golden Python + TB RTL (imagen real)
+├── run_all_sims.ps1              # Todas las sims: Phase 7 + Layer0 patch (configurar OSS_CAD_PATH)
+├── check_sim_tools.py            # Comprobar si iverilog/vvp están disponibles
 ├── yolov4-tiny.cfg
 └── yolov3-tiny.cfg
 ```
@@ -89,14 +95,17 @@ dpu-custom-yolo/
 - Fase 4b: `python phase4b_multiplier_exploration.py`
 - Golden para RTL: `python tests/test_rtl_vectors.py` (vectores MAC, LeakyReLU, mult)
 - **Phase 7 AutoCheck:** `python run_phase7_autocheck.py` (Python golden + simulaciones RTL; requiere iverilog en PATH para RTL). Opciones: `--python-only`, `--rtl-only`, `-q`.
+- **Imagen → detección (Stage 1):** `python run_image_to_detection.py [imagen.jpg]` o `--synthetic`. Detector SW opcional (OpenCV/YOLO); guarda entrada capa 0 en `sim_out/image_input_layer0.npy` (o `image_sim_out/`) para RTL.
+- **Layer0 patch (un píxel, 4 canales, imagen real):** `python run_layer0_patch_check.py` (o `--python-only`). Golden Python + TB RTL comparan 4 canales del píxel (0,0) de la capa 0; requiere iverilog para RTL.
 
 ### RTL (simulación)
 
-- **Con Icarus (local):** Icarus no soporta `program`/`clocking`. Se usan los TB `*_iv.sv`.
-  - Poner OSS CAD en PATH (ej. `C:\project\upm\oss-cad-suite\oss-cad-suite`).
-  - `.\run_dpu_sim.ps1 mac_int8` (o leaky_relu, mult_shift_add).
-  - O: `python verilog-sim-py/sv_simulator.py --no-wave rtl/dpu/primitives/mac_int8.sv rtl/tb/mac_int8_tb_iv.sv --top mac_int8_tb`
-- **Con clocking blocks (depuración sin carreras):** Usar **EDA Playground** (edaplayground.com) con ModelSim o VCS; subir el RTL de la primitiva y el TB **sin** `_iv` (ej. `mac_int8_tb.sv`). Ver `docs/SIMULACION_RTL.md`.
+- **Todas las simulaciones (Phase 7 + Layer0 patch):** Configurar iverilog (OSS CAD Suite o Icarus) y ejecutar:
+  - `$env:OSS_CAD_PATH = "C:\ruta\a\oss-cad-suite\oss-cad-suite"` (o editar `$OSS_CAD_PATH` en `run_all_sims.ps1`).
+  - `python check_sim_tools.py` — comprueba si iverilog/vvp están disponibles.
+  - `.\run_all_sims.ps1` — ejecuta Phase 7 (primitivas) + Layer0 patch (4 canales). Ver `docs/SIMULACION_RTL.md`.
+- **Solo primitivas (una a una):** `.\run_dpu_sim.ps1 mac_int8` (o leaky_relu, mult_shift_add). Icarus no soporta `program`/`clocking`; se usan los TB `*_iv.sv`.
+- **Con clocking blocks (depuración):** EDA Playground (edaplayground.com) con ModelSim/VCS; TB sin `_iv`. Ver `docs/SIMULACION_RTL.md`.
 
 ---
 
@@ -115,6 +124,11 @@ dpu-custom-yolo/
 ### Opción C — Ampliar verificación (Phase 7+)
 
 - Incluir **mac_array_2x2** en el AutoCheck (TB + golden) y, cuando exista, un test del DPU completo.
+
+### Opción D — Simulación a nivel imagen (imagen → detección)
+
+- **Objetivo:** Meter una imagen real, detectar por SW (cara/objeto) y que la misma imagen fluya por la tubería hasta que el sistema (simulación HW) “detecte” lo mismo.
+- **Plan por etapas:** Ver `docs/IMAGE_TO_DETECTION_PLAN.md`. Etapa 1: `run_image_to_detection.py` (imagen → tensor → capa 0 Python, guarda entrada). Etapa 2a (hecha): **un píxel** de la capa 0 con datos de imagen: `run_layer0_patch_check.py` (golden Python + TB RTL que comparan 27 MACs + bias + LeakyReLU + requantize). Siguiente: runner de toda la capa en RTL.
 
 ---
 

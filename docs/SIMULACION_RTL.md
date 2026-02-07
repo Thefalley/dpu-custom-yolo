@@ -1,4 +1,4 @@
-# Simulación RTL (Phase 6)
+# Simulación RTL (Phase 6 + Phase 7 + Layer0 patch)
 
 Instrucciones para simular los testbenches del DPU. Hay **dos opciones**: con **clocking blocks** (recomendado para depuración) o con **Icarus Verilog** local.
 
@@ -65,7 +65,7 @@ python verilog-sim-py/sv_simulator.py --no-wave rtl/dpu/primitives/leaky_relu.sv
 python verilog-sim-py/sv_simulator.py --no-wave rtl/dpu/primitives/mult_shift_add.sv rtl/tb/mult_shift_add_tb_iv.sv --top mult_shift_add_tb
 ```
 
-### 3.3 Script todo-en-uno
+### 3.3 Script todo-en-uno (primitivas)
 
 ```powershell
 .\run_dpu_sim.ps1 mac_int8
@@ -73,11 +73,61 @@ python verilog-sim-py/sv_simulator.py --no-wave rtl/dpu/primitives/mult_shift_ad
 .\run_dpu_sim.ps1 mult_shift_add
 ```
 
-`run_dpu_sim.ps1` usa los `*_iv.sv` para Icarus.
+`run_dpu_sim.ps1` usa los `*_iv.sv` para Icarus. Edita `$OSS_CAD_PATH` dentro del script si tu OSS CAD / Icarus está en otra ruta.
 
 ---
 
-## 4. Resumen de archivos
+## 4. Ejecutar todas las simulaciones (Phase 7 + Layer0 patch)
+
+Un solo script ejecuta **Phase 7 AutoCheck** (primitivas) y **Layer0 patch** (4 canales, un píxel con datos de imagen).
+
+### 4.1 Configurar iverilog
+
+**Opción A — Variable de entorno**
+
+En PowerShell (o en el sistema):
+
+```powershell
+$env:OSS_CAD_PATH = "C:\ruta\a\oss-cad-suite\oss-cad-suite"
+# o, si solo tienes Icarus:
+$env:PATH = "C:\iverilog\bin;$env:PATH"
+```
+
+**Opción B — Archivo `.oss_cad_path`**
+
+Copia `.oss_cad_path.example` a `.oss_cad_path`, edita y deja una sola línea con la ruta (las líneas que empiezan por `#` se ignoran). `run_all_sims.ps1` y `check_sim_tools.py` leerán esa ruta.
+
+**Opción C — Dentro del script**
+
+Edita `run_all_sims.ps1` y asigna la ruta a `$OSS_CAD_PATH` (donde dice `$OSS_CAD_PATH = ""`).
+
+### 4.2 Comprobar herramientas
+
+```powershell
+python check_sim_tools.py
+```
+
+Comprueba si iverilog/vvp están disponibles y hace una prueba de compilación/simulación.
+
+### 4.3 Ejecutar todas las sims
+
+Desde la raíz del proyecto:
+
+```powershell
+.\run_all_sims.ps1
+```
+
+O pasando la ruta por parámetro:
+
+```powershell
+.\run_all_sims.ps1 -OSS_CAD_PATH "C:\ruta\a\oss-cad-suite\oss-cad-suite"
+```
+
+Si todo pasa: Phase 7 (mac_int8, leaky_relu, mult_shift_add) y Layer0 patch (4 canales) habrán dado PASS.
+
+---
+
+## 5. Resumen de archivos
 
 | Archivo              | Uso                                      |
 |----------------------|------------------------------------------|
@@ -87,13 +137,16 @@ python verilog-sim-py/sv_simulator.py --no-wave rtl/dpu/primitives/mult_shift_ad
 | `rtl/tb/leaky_relu_tb_iv.sv` | Icarus local                             |
 | `rtl/tb/mult_shift_add_tb.sv`| Clocking → EDA Playground / ModelSim / VCS |
 | `rtl/tb/mult_shift_add_tb_iv.sv` | Icarus local                          |
+| `rtl/tb/layer0_patch_tb_iv.sv`  | Icarus: un píxel, 4 canales (imagen)  |
+| `run_all_sims.ps1`              | Ejecuta Phase 7 + Layer0 patch       |
+| `check_sim_tools.py`             | Comprueba iverilog/vvp                |
 
 ---
 
-## 5. Si tienes ModelSim/Questa/VCS local
+## 6. Si tienes ModelSim/Questa/VCS local
 
 Puedes simular los `.sv` **con clocking** (sin `_iv`) con tu herramienta habitual; el flujo depende del simulador. Los mismos archivos que en EDA Playground sirven para ModelSim/Questa/VCS.
 
 ---
 
-**Resumen:** Para **clocking blocks** y depuración sin carreras, usa **EDA Playground** (o ModelSim/VCS) con los TB `*.sv` (sin `_iv`). Para **Icarus** en local, usa los TB `*_iv.sv` y `run_dpu_sim.ps1` o los comandos de la sección 3.
+**Resumen:** Para **clocking blocks** y depuración sin carreras, usa **EDA Playground** (o ModelSim/VCS) con los TB `*.sv` (sin `_iv`). Para **Icarus** en local: configura **OSS_CAD_PATH** (o PATH), usa los TB `*_iv.sv`, y ejecuta **`.\run_all_sims.ps1`** para Phase 7 + Layer0 patch, o **`.\run_dpu_sim.ps1 <test>`** para una primitiva.
