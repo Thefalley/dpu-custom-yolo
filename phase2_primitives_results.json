@@ -1,0 +1,57 @@
+{
+  "phase": 2,
+  "title": "DPU Primitives Identification",
+  "models_analyzed": [
+    "YOLOv3-tiny",
+    "YOLOv4-tiny"
+  ],
+  "primitives": {
+    "critical": [
+      "MAC"
+    ],
+    "high": [
+      "Conv3x3",
+      "Conv1x1",
+      "LeakyReLU",
+      "Requantize",
+      "BiasAdd"
+    ],
+    "medium": [
+      "MaxPool2x2",
+      "Route"
+    ],
+    "low": [
+      "Upsample2x"
+    ]
+  },
+  "data_types": {
+    "weights": "INT8",
+    "activations": "INT8",
+    "accumulator": "INT32",
+    "bias": "INT32"
+  },
+  "not_needed": [
+    "SiLU",
+    "Mish",
+    "Sigmoid",
+    "Softmax",
+    "Depthwise Conv",
+    "Dilated Conv",
+    "Transposed Conv",
+    "Large kernels (5x5, 7x7)",
+    "Floating point"
+  ],
+  "leaky_relu": {
+    "alpha": 0.1,
+    "approximation": "1/8 (shift right 3)",
+    "hardware": "comparator + shifter + mux"
+  },
+  "max_channels": {
+    "YOLOv3-tiny": 1024,
+    "YOLOv4-tiny": 512
+  },
+  "recommendation": {
+    "simple_dpu": "YOLOv3-tiny",
+    "optimized_dpu": "YOLOv4-tiny"
+  }
+}
