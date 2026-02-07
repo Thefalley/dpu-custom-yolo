@@ -19,11 +19,18 @@ module mac_int8_tb;
         .acc_out(acc_out), .done(done)
     );
 
-    initial forever #5 clk = ~clk;
+    initial begin clk = 0; forever #5 clk = ~clk; end
 
     initial begin
         $dumpfile("waveform.vcd");
         $dumpvars(0, mac_int8_tb);
+    end
+
+    // Force exit after 10 us (in case vvp on Windows does not exit on $finish)
+    initial begin
+        #10000;
+        $display("TIMEOUT: forcing $finish");
+        $finish;
     end
 
     task run_mac(input logic signed [7:0] w, a, input logic signed [31:0] acc);

@@ -12,8 +12,9 @@ module leaky_relu_tb;
 
     leaky_relu dut (.clk(clk), .rst_n(rst_n), .valid(valid), .x(x), .y(y), .done(done));
 
-    initial forever #5 clk = ~clk;
+    initial begin clk = 0; forever #5 clk = ~clk; end
     initial begin $dumpfile("waveform.vcd"); $dumpvars(0, leaky_relu_tb); end
+    initial begin #100000; $display("TIMEOUT: forcing $finish"); $finish; end
 
     task run_relu(input logic signed [31:0] x_in);
         @(posedge clk); x <= x_in; valid <= 1;

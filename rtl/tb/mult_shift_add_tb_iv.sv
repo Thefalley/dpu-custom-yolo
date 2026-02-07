@@ -13,8 +13,9 @@ module mult_shift_add_tb;
 
     mult_shift_add dut (.clk(clk), .rst_n(rst_n), .valid(valid), .a(a), .b(b), .product(product), .done(done));
 
-    initial forever #5 clk = ~clk;
+    initial begin clk = 0; forever #5 clk = ~clk; end
     initial begin $dumpfile("waveform.vcd"); $dumpvars(0, mult_shift_add_tb); end
+    initial begin #100000; $display("TIMEOUT: forcing $finish"); $finish; end
 
     task run_mult(input logic signed [7:0] a_in, b_in);
         @(posedge clk); a <= a_in; b <= b_in; valid <= 1;

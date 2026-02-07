@@ -16,14 +16,12 @@ module requantize #(
 );
 
     // acc (32b) * scale (16b) -> 48b product; shift right SCALE_Q for fixed-point
-    logic signed [95:0] product96;
-    logic signed [95:0] shifted;
+    logic signed [47:0] product48;
     logic signed [31:0] rounded;
     logic signed [7:0]  clamped;
 
-    assign product96 = (48'signed(acc)) * (48'signed(scale));
-    assign shifted   = product96 >>> SCALE_Q;
-    assign rounded   = shifted[31:0];
+    assign product48 = acc * $signed(scale);
+    assign rounded   = product48 >>> SCALE_Q;
     // Clamp to INT8 range
     assign clamped = (rounded > 32'sd127)  ? 8'sd127 :
                      (rounded < -32'sd128) ? -8'sd128 :
