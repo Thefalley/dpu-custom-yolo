@@ -1,4 +1,4 @@
-# Run all DPU RTL simulations: Phase 7 (primitives) + Layer0 patch (4 channels).
+# Run all DPU RTL simulations: Phase 7 (primitives) + Layer0 patch + Layer1 patch.
 # Set OSS_CAD_PATH below to your OSS CAD Suite or Icarus install so iverilog/vvp are found.
 # Then run: .\run_all_sims.ps1
 
@@ -40,17 +40,35 @@ $r7 = 0
 if ($LASTEXITCODE -ne 0) { $r7 = 1 }
 
 Write-Host ""
-Write-Host "========== Layer0 patch (one pixel, 4 channels) =========="
-$rL = 0
-& python run_layer0_patch_check.py
-if ($LASTEXITCODE -ne 0) { $rL = 1 }
+Write-Host "========== Layer0 engine (one channel, 27 MACs) =========="
+$rEng = 0
+& python run_layer0_engine_check.py
+if ($LASTEXITCODE -ne 0) { $rEng = 1 }
 
 Write-Host ""
-if ($r7 -eq 0 -and $rL -eq 0) {
-    Write-Host "ALL SIMULATIONS PASSED"
+Write-Host "========== Layer0 patch (one pixel, 4 channels) =========="
+$rL0 = 0
+& python run_layer0_patch_check.py
+if ($LASTEXITCODE -ne 0) { $rL0 = 1 }
+
+Write-Host ""
+Write-Host "========== Layer1 patch (one pixel, 4 channels, 288 MACs each) =========="
+$rL1 = 0
+& python run_layer1_patch_check.py
+if ($LASTEXITCODE -ne 0) { $rL1 = 1 }
+
+Write-Host ""
+Write-Host "========== DPU Layer0 command TB 4x4 (structured interface) =========="
+$rCmd4 = 0
+& python run_dpu_layer0_cmd_4x4_check.py
+if ($LASTEXITCODE -ne 0) { $rCmd4 = 1 }
+
+Write-Host ""
+if ($r7 -eq 0 -and $rEng -eq 0 -and $rL0 -eq 0 -and $rL1 -eq 0 -and $rCmd4 -eq 0) {
+    Write-Host "ALL SIMULATIONS PASSED (Phase7 + Layer0 engine + Layer0 patch + Layer1 + DPU cmd 4x4)"
     exit 0
 } else {
-    Write-Host "SOME SIMULATIONS FAILED (Phase7 exit=$r7, Layer0 patch exit=$rL)"
+    Write-Host "SOME SIMULATIONS FAILED (Phase7=$r7, Engine=$rEng, Layer0=$rL0, Layer1=$rL1, Cmd4x4=$rCmd4)"
     if ($OSS_CAD_PATH -eq "" -and $env:OSS_CAD_PATH -eq "") {
         Write-Host "Tip: set OSS_CAD_PATH in this script or in the environment to point to OSS CAD Suite or Icarus (bin must contain iverilog and vvp)."
     }

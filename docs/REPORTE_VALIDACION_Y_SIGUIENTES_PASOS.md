@@ -31,7 +31,7 @@ Hoy tenemos:
 
 En resumen:
 
-- **Validado:** cada primitiva por separado (MAC, LeakyReLU, mult_shift_add) y el **patch de un píxel de la capa 0** (4 canales) en RTL vs Python.
+- **Validado:** cada primitiva por separado (MAC, LeakyReLU, mult_shift_add), el **patch de un píxel de la capa 0** (4 canales) y el **patch de un píxel de la capa 1** (4 canales, 288 MACs cada uno) en RTL vs Python.
 - **Pendiente:** validar **toda la capa 0** en RTL (o más) y luego el procesamiento de imagen completo.
 
 ---
@@ -45,7 +45,7 @@ En resumen:
 | **Golden “un píxel” (Python)** | ✅ COMPLETO | `tests/layer0_patch_golden.py` genera vectores para un píxel (0,0) y 4 canales: 27 pesos × 27 activaciones, bias, expected_int8. Escribe `image_sim_out/layer0_patch_*.hex` y `layer0_patch_golden.json`. |
 | **TB RTL “un píxel” (layer0_patch_tb_iv)** | ✅ COMPLETO | Ejecuta 4 canales (27 MACs + bias + LeakyReLU + requantize por canal). **4/4 PASS** frente a `layer0_patch_golden.json`. Fix: timing MAC — 3 ciclos por MAC (drive, MAC actualiza, latch) porque el MAC tiene latencia 1 ciclo. |
 | **Requantize RTL** | ⚠️ CORREGIDO PARCIAL | Icarus daba error de sintaxis con `48'signed(...)`; se cambió a `product48 = acc * $signed(scale); rounded = product48 >>> SCALE_Q`. No hay TB standalone de requantize; se usa solo en layer0_patch_tb. |
-| **run_all_sims.ps1** | ✅ FUNCIONAL | Ejecuta Phase 7 + layer0 patch. Phase 7 pasa; layer0 patch sale FAIL por el TB anterior. |
+| **run_all_sims.ps1** | ✅ FUNCIONAL | Ejecuta Phase 7 + **Layer0 engine** + Layer0 patch + Layer1 patch. Todos pasan (ALL PASS). |
 
 ---
 
@@ -59,10 +59,17 @@ En resumen:
   - Phase 7 (primitivas): `run_phase7_autocheck.py` (opción `--python-only` si no hay iverilog)
   - Imagen + capa 0 Python: `run_image_to_detection.py [imagen.jpg]` o `--synthetic`
   - Golden un píxel: `python tests/layer0_patch_golden.py` (requiere haber corrido antes `run_image_to_detection.py`)
+  - **Layer0 engine (RTL):** `run_layer0_engine_check.py` — valida `layer0_engine.sv` (1 canal, 27 MACs) vs golden.
   - Layer0 patch (Python + RTL): `run_layer0_patch_check.py` (RTL pasa 4/4)
+  - **Layer1 patch (Python + RTL):** `run_layer1_patch_check.py` (1 píxel, 4 canales, 288 MACs cada uno → 4/4 PASS)
   - Capa 0 región 4×4 (Python + RTL): `run_layer0_full_check.py` (export 4×4 + sim `layer0_full_4x4_tb` → 512 PASS)
+  - **Capa 0 completa por comandos:** `run_dpu_layer0_cmd_check.py` — export hex (padded + weights + bias), sim `dpu_layer0_cmd_tb` (interfaz de comandos), compara con `layer0_output_ref.npy`. Pasar imagen: generar hex con `run_image_to_detection.py` + `tests/layer0_full_208_export.py`, luego ejecutar este script.
   - **Validación final DPU (imagen → coordenadas):** `run_dpu_validation.py imagen.jpg` — inyectas una imagen y obtienes las coordenadas de objetos (YOLO + OpenCV caras); opcional `-o resultado.json`, `--quiet`.
-- **TB layer0 patch:** `rtl/tb/layer0_patch_tb_iv.sv`; **TB capa 0 4×4:** `rtl/tb/layer0_full_4x4_tb_iv.sv` (lee `layer0_full4x4_*.hex`)
+- **Layer0 engine:** `rtl/dpu/layer0_engine.sv` (FSM + primitivas); **TB:** `rtl/tb/layer0_engine_tb_iv.sv`.
+- **DPU Layer0 top (interfaz de comandos):** `rtl/dpu/dpu_layer0_top.sv` — instancia el engine, memorias (entrada/pesos/bias/salida) e interfaz de comandos (`write_byte`, `run_layer0`, `read_byte`). Permite un TB estructurado.
+- **TB estructurado por comandos:** `rtl/tb/dpu_layer0_cmd_tb.sv` — tasks: `LoadImage()`, `LoadWeights()`, `LoadBias()`, `RunLayer0()`, `ReadOutputToFile()`. Pasar imagen = colocar hex en `image_sim_out/` (generados por Python) y ejecutar el TB. Orquestador: `run_dpu_layer0_cmd_check.py`.
+- **TB 4x4 por comandos (rápido):** `rtl/tb/dpu_layer0_cmd_tb_4x4.sv` — misma interfaz, región 4x4 (243 B entrada, 512 B salida), compara con `layer0_full4x4_expected.hex`. Orquestador: `run_dpu_layer0_cmd_4x4_check.py`. Incluido en `run_all_sims.ps1` y `run_dpu_sim.ps1 dpu_layer0_cmd_4x4`.
+- **TB layer0 patch:** `rtl/tb/layer0_patch_tb_iv.sv`; **TB layer1 patch:** `rtl/tb/layer1_patch_tb_iv.sv` (288 MACs por canal); **TB capa 0 4×4:** `rtl/tb/layer0_full_4x4_tb_iv.sv`.
 - **Referencia numérica:** `image_sim_out/layer0_patch_golden.json`; salida capa 0: `layer0_output_ref.npy`; con `--layers 2`: `layer1_output_ref.npy`
 
 ---
@@ -94,8 +101,11 @@ En resumen:
   - `python run_layer0_patch_check.py --python-only`
   - `python run_layer0_full_check.py --python-only` (export 4×4, sin sim RTL)
 - **Con RTL (iverilog; `.oss_cad_path` o OSS_CAD_PATH):**
-  - `.\run_all_sims.ps1` → Phase 7 + Layer0 patch **ALL PASS**
+  - `.\run_all_sims.ps1` → Phase 7 + Layer0 patch + **Layer1 patch** **ALL PASS**
   - `python run_layer0_full_check.py` → export 4×4 + sim **layer0_full_4x4_tb** (512 PASS)
+  - `python run_dpu_layer0_cmd_check.py` → export hex + sim **dpu_layer0_cmd_tb** (capa 0 completa por interfaz de comandos) + comparar con referencia
+  - `python run_dpu_layer0_cmd_4x4_check.py` → export 4x4 + sim **dpu_layer0_cmd_tb_4x4** (prueba rápida por comandos, 512 bytes vs expected)
+  - `.\run_dpu_sim.ps1 dpu_layer0_cmd_4x4` → solo sim 4x4 por comandos (requiere hex 4x4 exportados antes)
 
 ---
 
@@ -103,7 +113,7 @@ En resumen:
 
 - **Sí:** Hemos hecho validación **a nivel de cada primitiva** (MAC, LeakyReLU, mult_shift_add): cada una por separado está verificada RTL vs Python.
 - **Hecho:** El **patch de un píxel de la capa 0** (4 canales) ya funciona en RTL y coincide con Python (layer0_patch_tb 4/4 PASS).
-- **Hecho:** Región 4×4×32 de la capa 0 validada en RTL (layer0_full_4x4_tb 512 PASS). Referencia de procesamiento completo en Python con `--layers 2`.
+- **Hecho:** Región 4×4×32 de la capa 0 validada en RTL (layer0_full_4x4_tb 512 PASS). **Capa 1 patch** validada en RTL (layer1_patch_tb 4/4 PASS, 288 MACs por canal). Referencia de procesamiento completo en Python con `--layers 2`.
 - **Pendiente:** Extender RTL a más regiones o toda la capa 0; luego más capas en RTL.
 
 Este documento sirve como **reporte para que otro agente retome el trabajo** en ese punto.
