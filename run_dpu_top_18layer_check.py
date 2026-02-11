@@ -19,9 +19,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.resolve()
 
 
-def run_golden():
+def run_golden(real_weights=False):
+    cmd = [sys.executable, str(PROJECT_ROOT / "tests" / "dpu_top_18layer_golden.py")]
+    if real_weights:
+        cmd.append("--real-weights")
     r = subprocess.run(
-        [sys.executable, str(PROJECT_ROOT / "tests" / "dpu_top_18layer_golden.py")],
+        cmd,
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -60,14 +63,16 @@ def main():
     import argparse
     ap = argparse.ArgumentParser(description="DPU Top 18-layer check")
     ap.add_argument("--python-only", action="store_true", help="Skip RTL simulation")
+    ap.add_argument("--real-weights", action="store_true", help="Use real YOLOv4-tiny weights")
     args = ap.parse_args()
 
+    mode = "REAL weights" if args.real_weights else "synthetic weights"
     print("=" * 60)
-    print("DPU Top 18-Layer Check (H0=16, W0=16)")
+    print(f"DPU Top 18-Layer Check (H0=16, W0=16) [{mode}]")
     print("=" * 60)
 
     print("\n[1] Python golden model")
-    ok, out = run_golden()
+    ok, out = run_golden(real_weights=args.real_weights)
     if not ok:
         print("  [FAIL] Golden model failed")
         for line in out.strip().splitlines():

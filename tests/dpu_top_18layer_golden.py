@@ -13,10 +13,13 @@ Output directory: image_sim_out/dpu_top/
   - layerN_expected.hex      (output fmap for each layer)
   - final_output_expected.hex
 
-Usage: python tests/dpu_top_18layer_golden.py
+Usage:
+  python tests/dpu_top_18layer_golden.py                  # synthetic random weights
+  python tests/dpu_top_18layer_golden.py --real-weights    # real YOLOv4-tiny weights
 """
 
 import sys
+import argparse
 from pathlib import Path
 import numpy as np
 
@@ -65,7 +68,8 @@ LAYER_DEFS = [
 ]
 
 
-def conv_bn_leaky_hw(input_fm, weights, bias, stride=1, kernel_size=3):
+def conv_bn_leaky_hw(input_fm, weights, bias, stride=1, kernel_size=3,
+                     scale=SCALE_RTL):
     """Hardware-accurate conv+BN+LeakyReLU+requantize using fixed-point scale."""
     if kernel_size == 3:
         conv_out = conv2d_3x3(input_fm, weights, bias, stride=stride)
@@ -73,7 +77,7 @@ def conv_bn_leaky_hw(input_fm, weights, bias, stride=1, kernel_size=3):
         conv_out = conv2d_1x1(input_fm, weights, bias)
 
     relu_out = leaky_relu_hardware(conv_out)
-    output = requantize_fixed_point(relu_out, np.int32(SCALE_RTL), SHIFT_RTL)
+    output = requantize_fixed_point(relu_out, np.int32(scale), SHIFT_RTL)
     return output
 
 
@@ -97,13 +101,36 @@ def write_bias_hex(path, bias_array):
             f.write(f"{(val >> 24) & 0xff:02x}\n")
 
 
+def load_real_weights():
+    """Load real YOLOv4-tiny quantized weights from npz file."""
+    npz_path = PROJECT_ROOT / "image_sim_out" / "dpu_top_real" / "quantized_weights.npz"
+    if not npz_path.exists():
+        print(f"[ERROR] Real weights not found: {npz_path}")
+        print("Run: python tests/load_yolov4_tiny_weights.py")
+        return None, None
+
+    data = np.load(npz_path)
+    weights = {}
+    biases = {}
+    conv_layers = [0, 1, 2, 4, 5, 7, 10, 12, 13, 15]
+    for idx in conv_layers:
+        weights[idx] = data[f'w{idx}']
+        biases[idx] = data[f'b{idx}']
+    return weights, biases
+
+
 def main():
+    parser = argparse.ArgumentParser(description='DPU 18-layer golden model')
+    parser.add_argument('--real-weights', action='store_true',
+                        help='Use real YOLOv4-tiny quantized weights')
+    args = parser.parse_args()
+
     np.random.seed(42)
 
     out_dir = PROJECT_ROOT / "image_sim_out" / "dpu_top"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate input image
+    # Generate input image (synthetic for both modes)
     input_img = np.random.randint(-50, 50, (3, H0, W0), dtype=np.int8)
     write_hex8_file(out_dir / "input_image.hex", input_img.flatten())
 
@@ -114,16 +141,26 @@ def main():
     save_l10 = None
     save_l12 = None
 
-    # Generate weights for conv layers
+    # Load or generate weights
     weights = {}
     biases = {}
 
-    for i, (ltype, c_in, c_out, stride, kernel) in enumerate(LAYER_DEFS):
-        if ltype in ('conv3x3', 'conv1x1'):
-            w = np.random.randint(-20, 20, (c_out, c_in, kernel, kernel), dtype=np.int8)
-            b = np.random.randint(-200, 200, c_out, dtype=np.int32)
-            weights[i] = w
-            biases[i] = b
+    if args.real_weights:
+        print("[MODE] Using REAL YOLOv4-tiny weights")
+        weights, biases = load_real_weights()
+        if weights is None:
+            return 1
+    else:
+        print("[MODE] Using synthetic random weights")
+        for i, (ltype, c_in, c_out, stride, kernel) in enumerate(LAYER_DEFS):
+            if ltype in ('conv3x3', 'conv1x1'):
+                w = np.random.randint(-20, 20, (c_out, c_in, kernel, kernel), dtype=np.int8)
+                b = np.random.randint(-200, 200, c_out, dtype=np.int32)
+                weights[i] = w
+                biases[i] = b
+
+    scale = SCALE_RTL
+    print(f"[CONFIG] scale={scale} (0x{scale:04X}), shift={SHIFT_RTL}")
 
     # Run all layers
     current_fmap = input_img
@@ -131,13 +168,13 @@ def main():
     for i, (ltype, c_in, c_out, stride, kernel) in enumerate(LAYER_DEFS):
         if ltype == 'conv3x3':
             out = conv_bn_leaky_hw(current_fmap, weights[i], biases[i],
-                                   stride=stride, kernel_size=3)
+                                   stride=stride, kernel_size=3, scale=scale)
             write_hex8_file(out_dir / f"layer{i}_weights.hex", weights[i].flatten())
             write_bias_hex(out_dir / f"layer{i}_bias.hex", biases[i])
 
         elif ltype == 'conv1x1':
             out = conv_bn_leaky_hw(current_fmap, weights[i], biases[i],
-                                   stride=1, kernel_size=1)
+                                   stride=1, kernel_size=1, scale=scale)
             write_hex8_file(out_dir / f"layer{i}_weights.hex", weights[i].flatten())
             write_bias_hex(out_dir / f"layer{i}_bias.hex", biases[i])
 
@@ -176,14 +213,19 @@ def main():
 
         write_hex8_file(out_dir / f"layer{i}_expected.hex", out.flatten())
 
+        # Count non-zero and saturated values for diagnostics
+        nz = np.count_nonzero(out)
+        sat = np.sum((out == 127) | (out == -128))
+        total = out.size
         print(f"Layer {i:2d} ({ltype:14s}): {c_in:3d} -> {c_out:3d}  "
-              f"shape={out.shape}  range=[{out.min():4d}, {out.max():3d}]")
+              f"shape={out.shape}  range=[{out.min():4d}, {out.max():3d}]  "
+              f"nonzero={nz}/{total} sat={sat}")
 
     write_hex8_file(out_dir / "final_output_expected.hex", current_fmap.flatten())
 
     with open(out_dir / "scale.hex", 'w') as f:
-        f.write(f"{SCALE_RTL & 0xff:02x}\n")
-        f.write(f"{(SCALE_RTL >> 8) & 0xff:02x}\n")
+        f.write(f"{scale & 0xff:02x}\n")
+        f.write(f"{(scale >> 8) & 0xff:02x}\n")
 
     print(f"\nFinal output shape: {current_fmap.shape}")
     print(f"Files written to: {out_dir}")
