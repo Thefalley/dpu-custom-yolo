@@ -81,6 +81,25 @@ def conv_bn_leaky_hw(input_fm, weights, bias, stride=1, kernel_size=3,
     return output
 
 
+def calibrate_scale(input_fm, weights, bias, stride=1, kernel_size=3):
+    """Compute optimal requant scale for a conv layer by examining accumulator range."""
+    if kernel_size == 3:
+        conv_out = conv2d_3x3(input_fm, weights, bias, stride=stride)
+    else:
+        conv_out = conv2d_1x1(input_fm, weights, bias)
+
+    relu_out = leaky_relu_hardware(conv_out)
+    max_abs = int(np.max(np.abs(relu_out)))
+    if max_abs == 0:
+        return SCALE_RTL
+    # Scale to map max_abs -> 127 in INT8: out = (relu * scale) >> 16
+    # We want: max_abs * scale >> 16 = 127
+    # scale = 127 * 2^16 / max_abs
+    scale = int(127 * (1 << SHIFT_RTL) / max_abs)
+    scale = max(1, min(scale, 65535))
+    return scale
+
+
 def to_hex8(x):
     return f"{(int(x) & 0xff):02x}"
 
@@ -123,7 +142,10 @@ def main():
     parser = argparse.ArgumentParser(description='DPU 18-layer golden model')
     parser.add_argument('--real-weights', action='store_true',
                         help='Use real YOLOv4-tiny quantized weights')
+    parser.add_argument('--per-layer-scale', action='store_true',
+                        help='Calibrate per-layer requant scale (auto with --real-weights)')
     args = parser.parse_args()
+    use_per_layer_scale = args.per_layer_scale or args.real_weights
 
     np.random.seed(42)
 
@@ -159,22 +181,30 @@ def main():
                 weights[i] = w
                 biases[i] = b
 
-    scale = SCALE_RTL
-    print(f"[CONFIG] scale={scale} (0x{scale:04X}), shift={SHIFT_RTL}")
+    layer_scales = [SCALE_RTL] * 18  # default: uniform scale
+    print(f"[CONFIG] default_scale={SCALE_RTL} (0x{SCALE_RTL:04X}), shift={SHIFT_RTL}")
+    if use_per_layer_scale:
+        print("[CONFIG] Per-layer scale calibration ENABLED")
 
     # Run all layers
     current_fmap = input_img
 
     for i, (ltype, c_in, c_out, stride, kernel) in enumerate(LAYER_DEFS):
         if ltype == 'conv3x3':
+            if use_per_layer_scale:
+                layer_scales[i] = calibrate_scale(current_fmap, weights[i], biases[i],
+                                                  stride=stride, kernel_size=3)
             out = conv_bn_leaky_hw(current_fmap, weights[i], biases[i],
-                                   stride=stride, kernel_size=3, scale=scale)
+                                   stride=stride, kernel_size=3, scale=layer_scales[i])
             write_hex8_file(out_dir / f"layer{i}_weights.hex", weights[i].flatten())
             write_bias_hex(out_dir / f"layer{i}_bias.hex", biases[i])
 
         elif ltype == 'conv1x1':
+            if use_per_layer_scale:
+                layer_scales[i] = calibrate_scale(current_fmap, weights[i], biases[i],
+                                                  stride=1, kernel_size=1)
             out = conv_bn_leaky_hw(current_fmap, weights[i], biases[i],
-                                   stride=1, kernel_size=1, scale=scale)
+                                   stride=1, kernel_size=1, scale=layer_scales[i])
             write_hex8_file(out_dir / f"layer{i}_weights.hex", weights[i].flatten())
             write_bias_hex(out_dir / f"layer{i}_bias.hex", biases[i])
 
@@ -217,16 +247,17 @@ def main():
         nz = np.count_nonzero(out)
         sat = np.sum((out == 127) | (out == -128))
         total = out.size
+        scale_str = f"scale={layer_scales[i]:5d}" if ltype in ('conv3x3', 'conv1x1') else "           "
         print(f"Layer {i:2d} ({ltype:14s}): {c_in:3d} -> {c_out:3d}  "
               f"shape={out.shape}  range=[{out.min():4d}, {out.max():3d}]  "
-              f"nonzero={nz}/{total} sat={sat}")
+              f"nonzero={nz}/{total} sat={sat} {scale_str}")
 
     write_hex8_file(out_dir / "final_output_expected.hex", current_fmap.flatten())
 
     # Export per-layer scales (18 entries x 2 bytes LE = 36 hex lines)
     with open(out_dir / "scales.hex", 'w') as f:
         for li in range(18):
-            s = scale & 0xffff
+            s = layer_scales[li] & 0xffff
             f.write(f"{s & 0xff:02x}\n")
             f.write(f"{(s >> 8) & 0xff:02x}\n")
 
