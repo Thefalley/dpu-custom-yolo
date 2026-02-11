@@ -1,5 +1,6 @@
 // DPU Top: 18-layer YOLOv4-tiny sequencer with PIO interface.
-// Instantiates conv_engine + maxpool_unit, ping-pong feature maps,
+// Uses conv_engine_array (32x32 MAC array) for parallel convolution.
+// Instantiates conv_engine_array + maxpool_unit, ping-pong feature maps,
 // save buffers for skip connections, and a layer descriptor ROM.
 //
 // CMD interface (byte-at-a-time):
@@ -138,8 +139,7 @@ module dpu_top #(
     reg signed [31:0] bias_buf   [0:MAX_CH-1];
     logic [15:0]      scale_reg;
 
-    reg signed [7:0] patch_buf   [0:1151];
-    reg signed [7:0] w_patch_buf [0:1151];
+    reg signed [7:0] patch_buf [0:1151];
 
     integer init_i;
     initial begin
@@ -154,28 +154,45 @@ module dpu_top #(
     logic ping_pong;
 
     // =========================================================================
-    // Conv engine instance
+    // Conv engine array instance
     // =========================================================================
     logic        eng_start, eng_done;
-    logic signed [7:0]  eng_act_in, eng_w_in;
-    logic signed [31:0] eng_bias;
-    logic [15:0] eng_scale;
-    logic signed [7:0]  eng_result_int8;
-    logic [10:0] eng_mac_index;
-    logic [10:0] eng_macs_count;
+    logic        eng_out_valid;
+    logic [8:0]  eng_out_ch_base;
+    logic [5:0]  eng_out_count;
+    logic signed [7:0] eng_out_data [0:31];
 
-    conv_engine #(.SCALE_Q(16)) u_engine (
+    // Latched pulse signals (1-cycle pulses that may arrive while busy)
+    logic        eng_done_latched;
+    logic [10:0] eng_patch_rd_addr;
+    logic signed [7:0] eng_patch_rd_data;
+    logic [17:0] eng_weight_rd_addr;
+    logic signed [7:0] eng_weight_rd_data;
+    logic [8:0]  eng_bias_rd_ch;
+    logic signed [31:0] eng_bias_rd_data;
+
+    conv_engine_array #(.SCALE_Q(16)) u_engine (
         .clk(clk), .rst_n(rst_n), .start(eng_start),
-        .macs_count(eng_macs_count),
-        .act_in(eng_act_in), .w_in(eng_w_in),
-        .bias(eng_bias), .scale(eng_scale),
-        .done(eng_done), .result_int8(eng_result_int8),
-        .mac_index(eng_mac_index)
+        .c_in(cur_c_in), .c_out(cur_c_out),
+        .kernel_size(cur_kernel_size),
+        .patch_rd_addr(eng_patch_rd_addr),
+        .patch_rd_data(eng_patch_rd_data),
+        .weight_rd_addr(eng_weight_rd_addr),
+        .weight_rd_data(eng_weight_rd_data),
+        .bias_rd_ch(eng_bias_rd_ch),
+        .bias_rd_data(eng_bias_rd_data),
+        .scale(scale_reg),
+        .out_valid(eng_out_valid),
+        .out_ch_base(eng_out_ch_base),
+        .out_count(eng_out_count),
+        .out_data(eng_out_data),
+        .done(eng_done)
     );
 
-    assign eng_act_in = patch_buf[eng_mac_index];
-    assign eng_w_in   = w_patch_buf[eng_mac_index];
-    assign eng_scale  = scale_reg;
+    // Wire engine read ports to memories
+    assign eng_patch_rd_data  = patch_buf[eng_patch_rd_addr];
+    assign eng_weight_rd_data = weight_buf[eng_weight_rd_addr];
+    assign eng_bias_rd_data   = bias_buf[eng_bias_rd_ch];
 
     // =========================================================================
     // MaxPool unit instance
@@ -200,9 +217,8 @@ module dpu_top #(
         S_CONV_LOAD_PATCH,
         S_CONV_START_ENG,
         S_CONV_ENGINE,
-        S_CONV_LATCH_RESULT,
-        S_CONV_WRITE_OUT,
-        S_CONV_NEXT,
+        S_CONV_WRITE_BATCH,
+        S_CONV_NEXT_PIXEL,
         S_POOL_LOAD,
         S_POOL_COMPUTE,
         S_POOL_WAIT,
@@ -228,22 +244,26 @@ module dpu_top #(
     logic [1:0]  cur_stride;
     logic [10:0] cur_macs;
     logic [2:0]  cur_src_a, cur_src_b;
+    logic [3:0]  cur_kernel_size;
 
     // Loop counters
-    integer oh, ow, ch;
+    integer oh, ow;
     integer load_c, load_ky, load_kx, load_idx;
     integer copy_idx, copy_total;
     integer pool_ch, pool_oh, pool_ow;
     integer save_idx;
 
-    // Temporaries (replacing automatic variables)
+    // Batch write counter
+    integer batch_idx;
+    integer batch_ch_base;
+    integer batch_count;
+
+    // Temporaries
     integer tmp_ih, tmp_iw, tmp_src_addr, tmp_dst_addr;
     integer tmp_total_a, tmp_total_b, tmp_ch_half;
     integer tmp_boff, tmp_bch, tmp_bsel, tmp_foff;
     integer tmp_base_h, tmp_base_w;
     integer tmp_addr00, tmp_addr01, tmp_addr10, tmp_addr11;
-
-    logic signed [7:0] result_captured;
     integer out_addr;
 
     always_ff @(posedge clk or negedge rst_n) begin
@@ -255,23 +275,28 @@ module dpu_top #(
             busy            <= 1'b0;
             done            <= 1'b0;
             eng_start       <= 1'b0;
-            eng_bias        <= 32'sd0;
-            eng_macs_count  <= 11'd27;
             pool_valid      <= 1'b0;
             current_layer_reg <= 5'd0;
             ping_pong       <= 1'b0;
             run_all_mode    <= 1'b0;
-            oh <= 0; ow <= 0; ch <= 0;
+            oh <= 0; ow <= 0;
             load_c <= 0; load_ky <= 0; load_kx <= 0; load_idx <= 0;
             copy_idx <= 0; save_idx <= 0;
             copy_total <= 0;
             pool_ch <= 0; pool_oh <= 0; pool_ow <= 0;
+            batch_idx <= 0; batch_ch_base <= 0; batch_count <= 0;
+            cur_kernel_size <= 4'd3;
+            eng_done_latched <= 1'b0;
         end else begin
             cmd_ready  <= 1'b0;
             rsp_valid  <= 1'b0;
             done       <= 1'b0;
             eng_start  <= 1'b0;
             pool_valid <= 1'b0;
+
+            // Latch engine done pulse (cleared when consumed)
+            if (eng_done)
+                eng_done_latched <= 1'b1;
 
             case (state)
                 // =============================================================
@@ -304,10 +329,6 @@ module dpu_top #(
                                 state <= S_LAYER_INIT;
                             end
                             3'd2: begin // read_byte
-                                // After layer done, ping_pong was toggled, so current
-                                // output is in the buffer that was written before toggle:
-                                // ping_pong=1 means last write was to fmap_b
-                                // ping_pong=0 means last write was to fmap_a
                                 if (ping_pong == 1'b0)
                                     rsp_data <= fmap_a[cmd_addr];
                                 else
@@ -362,7 +383,13 @@ module dpu_top #(
                     cur_src_a  <= ld_src_a [current_layer_reg];
                     cur_src_b  <= ld_src_b [current_layer_reg];
 
-                    oh <= 0; ow <= 0; ch <= 0;
+                    // Determine kernel size
+                    if (ld_type[current_layer_reg] == LT_CONV3X3)
+                        cur_kernel_size <= 4'd3;
+                    else
+                        cur_kernel_size <= 4'd1;
+
+                    oh <= 0; ow <= 0;
                     load_c <= 0; load_ky <= 0; load_kx <= 0; load_idx <= 0;
                     copy_idx <= 0;
                     pool_ch <= 0; pool_oh <= 0; pool_ow <= 0;
@@ -378,7 +405,9 @@ module dpu_top #(
                 end
 
                 // =============================================================
-                // CONV
+                // CONV: Load patch buffer with activations for pixel (oh, ow)
+                // Same addressing as before but only activations (no weights).
+                // load_idx goes 0..macs-1 where macs = c_in * K * K
                 // =============================================================
                 S_CONV_LOAD_PATCH: begin
                     if (cur_type == LT_CONV3X3) begin
@@ -393,7 +422,6 @@ module dpu_top #(
                             else
                                 patch_buf[load_idx] <= fmap_b[tmp_src_addr];
                         end
-                        w_patch_buf[load_idx] <= weight_buf[ch * cur_macs + load_idx];
 
                         if (load_kx == 2) begin
                             load_kx <= 0;
@@ -413,51 +441,66 @@ module dpu_top #(
                             patch_buf[load_idx] <= fmap_a[tmp_src_addr];
                         else
                             patch_buf[load_idx] <= fmap_b[tmp_src_addr];
-                        w_patch_buf[load_idx] <= weight_buf[ch * cur_macs + load_idx];
                         load_c <= load_c + 1;
                     end
 
                     if (load_idx == cur_macs - 1) begin
-                        eng_bias       <= bias_buf[ch];
-                        eng_macs_count <= cur_macs;
-                        state          <= S_CONV_START_ENG;
+                        state <= S_CONV_START_ENG;
                     end else begin
                         load_idx <= load_idx + 1;
                     end
                 end
 
+                // =============================================================
+                // CONV: Start engine array (processes ALL output channels)
+                // =============================================================
                 S_CONV_START_ENG: begin
                     eng_start <= 1'b1;
+                    eng_done_latched <= 1'b0;
                     state     <= S_CONV_ENGINE;
                 end
 
+                // =============================================================
+                // CONV: Wait for engine output batch
+                // eng_out_valid is a 1-cycle pulse; eng_out_data/ch_base/count
+                // hold their values until the NEXT out_valid, so we can read
+                // them over multiple cycles in S_CONV_WRITE_BATCH.
+                // =============================================================
                 S_CONV_ENGINE: begin
-                    if (eng_done) begin
-                        out_addr <= ch * cur_h_out * cur_w_out + oh * cur_w_out + ow;
-                        state    <= S_CONV_LATCH_RESULT;
+                    if (eng_out_valid) begin
+                        batch_ch_base <= eng_out_ch_base;
+                        batch_count   <= eng_out_count;
+                        batch_idx     <= 0;
+                        state         <= S_CONV_WRITE_BATCH;
                     end
                 end
 
-                S_CONV_LATCH_RESULT: begin
-                    result_captured <= eng_result_int8;
-                    state <= S_CONV_WRITE_OUT;
-                end
-
-                S_CONV_WRITE_OUT: begin
+                // =============================================================
+                // CONV: Write batch of results to output fmap
+                // eng_out_data[] holds values until next S_OUTPUT in engine
+                // =============================================================
+                S_CONV_WRITE_BATCH: begin
+                    out_addr = (batch_ch_base + batch_idx) * cur_h_out * cur_w_out
+                             + oh * cur_w_out + ow;
                     if (ping_pong == 1'b0)
-                        fmap_b[out_addr] <= result_captured;
+                        fmap_b[out_addr] <= eng_out_data[batch_idx];
                     else
-                        fmap_a[out_addr] <= result_captured;
-                    state <= S_CONV_NEXT;
+                        fmap_a[out_addr] <= eng_out_data[batch_idx];
+
+                    if (batch_idx + 1 >= batch_count) begin
+                        state <= S_CONV_NEXT_PIXEL;
+                    end else begin
+                        batch_idx <= batch_idx + 1;
+                    end
                 end
 
-                S_CONV_NEXT: begin
-                    if (ch + 1 < cur_c_out) begin
-                        ch <= ch + 1;
-                        load_c <= 0; load_ky <= 0; load_kx <= 0; load_idx <= 0;
-                        state <= S_CONV_LOAD_PATCH;
-                    end else begin
-                        ch <= 0;
+                // =============================================================
+                // CONV: After batch write, wait for more batches or done
+                // =============================================================
+                S_CONV_NEXT_PIXEL: begin
+                    if (eng_done || eng_done_latched) begin
+                        // All Cout channels done for this pixel. Next pixel.
+                        eng_done_latched <= 1'b0;
                         if (ow + 1 < cur_w_out) begin
                             ow <= ow + 1;
                             load_c <= 0; load_ky <= 0; load_kx <= 0; load_idx <= 0;
@@ -472,6 +515,12 @@ module dpu_top #(
                                 state <= S_SAVE_FMAP;
                             end
                         end
+                    end else if (eng_out_valid) begin
+                        // Another batch of results
+                        batch_ch_base <= eng_out_ch_base;
+                        batch_count   <= eng_out_count;
+                        batch_idx     <= 0;
+                        state         <= S_CONV_WRITE_BATCH;
                     end
                 end
 
@@ -507,7 +556,7 @@ module dpu_top #(
 
                 S_POOL_WAIT: begin
                     if (pool_done) begin
-                        out_addr <= pool_ch * cur_h_out * cur_w_out + pool_oh * cur_w_out + pool_ow;
+                        out_addr = pool_ch * cur_h_out * cur_w_out + pool_oh * cur_w_out + pool_ow;
                         state <= S_POOL_WRITE;
                     end
                 end
@@ -546,7 +595,6 @@ module dpu_top #(
                 // =============================================================
                 S_ROUTE_COPY_A: begin
                     if (cur_type == LT_ROUTE_SPLIT) begin
-                        // Split: take upper half (group_id=1)
                         tmp_total_a = cur_c_out * cur_h_out * cur_w_out;
                         tmp_src_addr = cur_c_out * cur_h_in * cur_w_in + copy_idx;
 
@@ -561,7 +609,6 @@ module dpu_top #(
                             copy_idx <= copy_idx + 1;
                         end
                     end else begin
-                        // Concat: copy source A first
                         tmp_ch_half = cur_c_out / 2;
                         tmp_total_a = tmp_ch_half * cur_h_out * cur_w_out;
 

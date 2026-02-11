@@ -37,7 +37,9 @@ def run_rtl():
         PROJECT_ROOT / "rtl" / "dpu" / "primitives" / "mac_int8.sv",
         PROJECT_ROOT / "rtl" / "dpu" / "primitives" / "leaky_relu.sv",
         PROJECT_ROOT / "rtl" / "dpu" / "primitives" / "requantize.sv",
-        PROJECT_ROOT / "rtl" / "dpu" / "conv_engine.sv",
+        PROJECT_ROOT / "rtl" / "dpu" / "mac_array_32x32.sv",
+        PROJECT_ROOT / "rtl" / "dpu" / "post_process_array.sv",
+        PROJECT_ROOT / "rtl" / "dpu" / "conv_engine_array.sv",
         PROJECT_ROOT / "rtl" / "dpu" / "maxpool_unit.sv",
         PROJECT_ROOT / "rtl" / "dpu" / "dpu_top.sv",
         PROJECT_ROOT / "rtl" / "tb" / "dpu_top_18layer_tb.sv",
@@ -49,7 +51,7 @@ def run_rtl():
         ocp = PROJECT_ROOT / ".oss_cad_path"
         if ocp.exists():
             env["OSS_CAD_PATH"] = ocp.read_text().strip()
-    r = subprocess.run(cmd, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=600, env=env)
+    r = subprocess.run(cmd, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=3600, env=env)
     out = (r.stdout or "") + (r.stderr or "")
     return "ALL 18 LAYERS PASS" in out, out
 
@@ -82,7 +84,7 @@ def main():
 
     print("\n[2] RTL simulation (Icarus Verilog)")
     rtl_ok, rtl_out = run_rtl()
-    for line in rtl_out.strip().splitlines()[-20:]:
+    for line in rtl_out.strip().splitlines():
         print("  ", line)
 
     print("\n" + "-" * 60)
