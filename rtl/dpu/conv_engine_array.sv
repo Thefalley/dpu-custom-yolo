@@ -9,6 +9,9 @@
 //
 // Patch layout (same as original):
 //   patch_buf[c * K*K + kpos]   for both 3x3 and 1x1 (kpos=0 for 1x1)
+//
+// NOTE: Module interfaces use packed flat vectors for array outputs because
+// Icarus Verilog does not correctly propagate unpacked array output ports.
 `default_nettype none
 
 module conv_engine_array #(
@@ -34,11 +37,11 @@ module conv_engine_array #(
     input  logic signed [31:0] bias_rd_data,
     // Scale
     input  logic [15:0] scale,
-    // Output: up to 32 results per batch
+    // Output: up to 32 results per batch (packed flat vector)
     output logic        out_valid,
     output logic [8:0]  out_ch_base,
     output logic [5:0]  out_count,       // valid channels (1..32)
-    output logic signed [7:0] out_data [0:31],
+    output wire  [255:0] out_data_flat,  // packed: [i*8+:8] = out_data[i]
     output logic        done
 );
 
@@ -50,30 +53,48 @@ module conv_engine_array #(
     reg signed [31:0] bias_reg [0:31];
 
     // =========================================================================
-    // MAC array instance
+    // MAC array instance (packed output)
     // =========================================================================
     logic        arr_valid, arr_clear, arr_done;
-    logic signed [31:0] arr_acc  [0:31];
+    wire [1023:0] acc_flat;
 
     mac_array_32x32 u_mac_array (
         .clk(clk), .rst_n(rst_n),
         .valid(arr_valid), .clear_acc(arr_clear),
-        .act_in(act_reg), .w_in(w_reg),   // flattened 1D array
-        .acc_out(arr_acc), .done(arr_done)
+        .act_in(act_reg), .w_in(w_reg),
+        .acc_out_flat(acc_flat), .done(arr_done)
     );
 
+    // Unpack MAC accumulator into local regs for post-process
+    // (Icarus needs reg arrays driven from local context for input ports)
+    reg signed [31:0] arr_acc [0:31];
+
     // =========================================================================
-    // Post-process instance
+    // Post-process instance (packed result output)
     // =========================================================================
     logic        pp_valid, pp_done;
-    logic signed [7:0]  pp_result [0:31];
+    wire [255:0] pp_result_flat;
 
     post_process_array #(.LANES(32), .SCALE_Q(SCALE_Q)) u_post (
         .clk(clk), .rst_n(rst_n),
         .valid(pp_valid),
         .acc_in(arr_acc), .bias(bias_reg), .scale(scale),
-        .result(pp_result), .done(pp_done)
+        .result_flat(pp_result_flat), .done(pp_done)
     );
+
+    // Unpack post-process result into local regs
+    reg signed [7:0] pp_result [0:31];
+
+    // Output data registers (packed for dpu_top)
+    reg signed [7:0] out_data_int [0:31];
+
+    // Pack output data as flat vector
+    genvar gk;
+    generate
+        for (gk = 0; gk < 32; gk = gk + 1) begin : gen_out_pack
+            assign out_data_flat[gk*8 +: 8] = out_data_int[gk];
+        end
+    endgenerate
 
     // =========================================================================
     // Derived parameters (latched on INIT)
@@ -135,6 +156,11 @@ module conv_engine_array #(
             cout_base <= 0; cin_base <= 0; kpos <= 0;
             first_mac <= 1'b0;
             ld_r <= 0; ld_c <= 0; ld_a <= 0; ld_b <= 0;
+            for (ii = 0; ii < 32; ii = ii + 1) begin
+                arr_acc[ii]      <= 32'sd0;
+                pp_result[ii]    <= 8'sd0;
+                out_data_int[ii] <= 8'sd0;
+            end
         end else begin
             arr_valid <= 1'b0;
             pp_valid  <= 1'b0;
@@ -199,8 +225,6 @@ module conv_engine_array #(
 
                 // =============================================================
                 // WEIGHT loading: row-major, 2-phase per element
-                // Loads w_reg[row*32+col] for row < active_rows, col < cin_actual
-                // Address: (cout_base+row)*macs_per_ch + (cin_base+col)*k_sq + kpos
                 // =============================================================
                 S_WLOAD_REQ: begin
                     active_rows = (cout_base + 32 <= c_out) ? 32 : (c_out - cout_base);
@@ -235,7 +259,6 @@ module conv_engine_array #(
 
                 // =============================================================
                 // ACTIVATION loading: 2-phase per element
-                // Address: (cin_base + idx) * k_sq + kpos
                 // =============================================================
                 S_ALOAD_REQ: begin
                     cin_actual = (cin_base + 32 <= c_in) ? 32 : (c_in - cin_base);
@@ -291,8 +314,11 @@ module conv_engine_array #(
                             end
                             state <= S_WLOAD_REQ;
                         end
-                        // All MACs done for Cout tile -> post-process
+                        // All MACs done for Cout tile -> capture acc and post-process
                         else begin
+                            // Capture MAC accumulators from packed wire into local regs
+                            for (ii = 0; ii < 32; ii = ii + 1)
+                                arr_acc[ii] <= $signed(acc_flat[ii*32 +: 32]);
                             state <= S_POST_PROCESS;
                         end
                     end
@@ -308,6 +334,9 @@ module conv_engine_array #(
 
                 S_PP_WAIT: begin
                     if (pp_done) begin
+                        // Capture post-process results from packed wire
+                        for (ii = 0; ii < 32; ii = ii + 1)
+                            pp_result[ii] <= $signed(pp_result_flat[ii*8 +: 8]);
                         state <= S_OUTPUT;
                     end
                 end
@@ -318,7 +347,7 @@ module conv_engine_array #(
                     out_ch_base <= cout_base[8:0];
                     out_count   <= active_rows[5:0];
                     for (ii = 0; ii < 32; ii = ii + 1)
-                        out_data[ii] <= pp_result[ii];
+                        out_data_int[ii] <= pp_result[ii];
 
                     // Next Cout tile?
                     if (cout_base + 32 < c_out) begin

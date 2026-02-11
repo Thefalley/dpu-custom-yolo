@@ -4,6 +4,9 @@
 //   Stage 1: biased = acc_in + bias
 //   Stage 2: relu   = biased >= 0 ? biased : (biased >>> 3)
 //   Stage 3: quant  = clamp((relu * scale) >>> SCALE_Q, -128, 127)
+//
+// NOTE: result output uses a packed flat vector because Icarus Verilog
+// does not correctly propagate unpacked array output ports between modules.
 `default_nettype none
 
 module post_process_array #(
@@ -16,7 +19,7 @@ module post_process_array #(
     input  logic signed [31:0] acc_in [0:LANES-1],
     input  logic signed [31:0] bias   [0:LANES-1],
     input  logic [15:0]        scale,
-    output reg   signed [7:0]  result [0:LANES-1],
+    output wire  [LANES*8-1:0] result_flat,    // packed: [i*8+:8] = result[i]
     output reg                 done
 );
 
@@ -28,6 +31,9 @@ module post_process_array #(
 
     // Stage 2 registered outputs
     reg signed [31:0] relu_r [0:LANES-1];
+
+    // Stage 3 result registers
+    reg signed [7:0] result_int [0:LANES-1];
 
     // Stage 3: combinational per-lane (using assign, like requantize.sv)
     wire signed [47:0] prod_w  [0:LANES-1];
@@ -42,6 +48,8 @@ module post_process_array #(
             assign clamp_w[gi] = (rnd_w[gi] > 32'sd127)  ? 8'sd127  :
                                  (rnd_w[gi] < -32'sd128) ? -8'sd128 :
                                  rnd_w[gi][7:0];
+            // Pack result as flat vector
+            assign result_flat[gi*8 +: 8] = result_int[gi];
         end
     endgenerate
 
@@ -54,9 +62,9 @@ module post_process_array #(
             v3 <= 1'b0;
             done <= 1'b0;
             for (i = 0; i < LANES; i = i + 1) begin
-                biased_r[i] <= 32'sd0;
-                relu_r[i]   <= 32'sd0;
-                result[i]   <= 8'sd0;
+                biased_r[i]   <= 32'sd0;
+                relu_r[i]     <= 32'sd0;
+                result_int[i] <= 8'sd0;
             end
         end else begin
             // Pipeline valid propagation
@@ -80,7 +88,7 @@ module post_process_array #(
             // Stage 3: Requantize (combinational via assign, latch result)
             if (v2) begin
                 for (i = 0; i < LANES; i = i + 1)
-                    result[i] <= clamp_w[i];
+                    result_int[i] <= clamp_w[i];
             end
         end
     end

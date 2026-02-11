@@ -43,10 +43,10 @@ module dpu_top_debug_tb;
                      $time,
                      u_dut.u_engine.out_ch_base,
                      u_dut.u_engine.out_count,
-                     u_dut.u_engine.out_data[0],
-                     u_dut.u_engine.out_data[1],
-                     u_dut.u_engine.out_data[2],
-                     u_dut.u_engine.out_data[3]);
+                     u_dut.u_engine.out_data_int[0],
+                     u_dut.u_engine.out_data_int[1],
+                     u_dut.u_engine.out_data_int[2],
+                     u_dut.u_engine.out_data_int[3]);
         if (u_dut.u_engine.done)
             $display("t=%0t [ENG_DONE]", $time);
     end
@@ -116,8 +116,8 @@ module dpu_top_debug_tb;
         if (u_dut.u_engine.pp_done) begin
             $display("t=%0t [PP_DONE] result[0]=%h result[1]=%h",
                      $time,
-                     u_dut.u_engine.u_post.result[0],
-                     u_dut.u_engine.u_post.result[1]);
+                     u_dut.u_engine.u_post.result_int[0],
+                     u_dut.u_engine.u_post.result_int[1]);
             $display("t=%0t [PP_INT] biased_r[0]=%h relu_r[0]=%h prod_w[0]=%h rnd_w[0]=%h clamp_w[0]=%h",
                      $time,
                      u_dut.u_engine.u_post.biased_r[0],

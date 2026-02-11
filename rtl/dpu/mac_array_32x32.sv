@@ -2,6 +2,9 @@
 // Output-stationary: 32 rows = 32 output channels, 32 cols = 32 input channels.
 // Each cycle: acc[r] += sum(w[r][c] * act[c]) for c=0..31
 // Arithmetic matches mac_int8: INT8*INT8->INT16, sign-extend to 32b, accumulate.
+//
+// NOTE: acc output uses a packed flat vector (1024 bits) because Icarus Verilog
+// does not correctly propagate unpacked array output ports between modules.
 `default_nettype none
 
 module mac_array_32x32 (
@@ -11,11 +14,11 @@ module mac_array_32x32 (
     input  logic        clear_acc,       // clear accumulators (start of Cout tile)
     input  logic signed [7:0]  act_in  [0:31],      // 32 activations (broadcast)
     input  logic signed [7:0]  w_in    [0:1023],     // weights [row*32+col], flattened
-    output logic signed [31:0] acc_out [0:31],       // 32 accumulators (1 per row)
+    output wire  [1023:0]      acc_out_flat,         // packed: [r*32+:32] = acc[r]
     output logic        done                         // 1 cycle after valid
 );
 
-    logic signed [31:0] acc [0:31];
+    reg signed [31:0] acc [0:31];
     integer r, c;
     logic signed [31:0] partial;
     logic signed [15:0] prod16;
@@ -43,11 +46,11 @@ module mac_array_32x32 (
         end
     end
 
-    // Output is always the accumulator value
+    // Pack accumulators as flat vector (combinational, zero delay)
     genvar gi;
     generate
-        for (gi = 0; gi < 32; gi = gi + 1) begin : gen_out
-            assign acc_out[gi] = acc[gi];
+        for (gi = 0; gi < 32; gi = gi + 1) begin : gen_pack
+            assign acc_out_flat[gi*32 +: 32] = acc[gi];
         end
     endgenerate
 

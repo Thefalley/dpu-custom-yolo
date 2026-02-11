@@ -160,7 +160,15 @@ module dpu_top #(
     logic        eng_out_valid;
     logic [8:0]  eng_out_ch_base;
     logic [5:0]  eng_out_count;
-    logic signed [7:0] eng_out_data [0:31];
+    wire [255:0] eng_out_data_flat;
+
+    // Unpack engine output from flat vector into local reg array
+    reg signed [7:0] eng_out_data [0:31];
+    integer unpack_i;
+    always @(eng_out_data_flat) begin
+        for (unpack_i = 0; unpack_i < 32; unpack_i = unpack_i + 1)
+            eng_out_data[unpack_i] = $signed(eng_out_data_flat[unpack_i*8 +: 8]);
+    end
 
     // Latched pulse signals (1-cycle pulses that may arrive while busy)
     logic        eng_done_latched;
@@ -185,7 +193,7 @@ module dpu_top #(
         .out_valid(eng_out_valid),
         .out_ch_base(eng_out_ch_base),
         .out_count(eng_out_count),
-        .out_data(eng_out_data),
+        .out_data_flat(eng_out_data_flat),
         .done(eng_done)
     );
 
