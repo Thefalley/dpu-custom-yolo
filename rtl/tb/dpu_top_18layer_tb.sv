@@ -69,6 +69,15 @@ module dpu_top_18layer_tb;
         send_cmd(3'd5, 24'd1, scale_val[15:8]);
     endtask
 
+    task write_layer_desc(input [4:0] layer, input [3:0] field, input [7:0] data);
+        send_cmd(3'd6, {15'd0, layer, field}, data);
+    endtask
+
+    task write_layer_scale(input [4:0] layer, input [15:0] scale_val);
+        write_layer_desc(layer, 4'd14, scale_val[7:0]);
+        write_layer_desc(layer, 4'd15, scale_val[15:8]);
+    endtask
+
     task read_byte(input [23:0] addr, output [7:0] data);
         @(posedge clk);
         cmd_valid <= 1;
@@ -87,6 +96,7 @@ module dpu_top_18layer_tb;
     // ---- Buffers ----
     reg [7:0] hex_buf [0:MAX_WBUF-1];
     reg [7:0] exp_buf [0:MAX_FMAP-1];
+    reg [7:0] scale_buf [0:35]; // 18 layers * 2 bytes LE
 
     // Layer output sizes
     localparam int OSIZE_0  = 32 * (H0/2) * (W0/2);      // 2048
@@ -182,9 +192,11 @@ module dpu_top_18layer_tb;
         for (i = 0; i < 768; i = i + 1)
             write_byte(FMAP_BASE + i, hex_buf[i]);
 
-        // Set scale
-        $display("[2] Setting scale");
-        write_scale(16'h028F);
+        // Load per-layer scales
+        $display("[2] Loading per-layer scales");
+        $readmemh("image_sim_out/dpu_top/scales.hex", scale_buf);
+        for (i = 0; i < 18; i = i + 1)
+            write_layer_scale(i[4:0], {scale_buf[i*2+1], scale_buf[i*2]});
 
         // ==== Layer 0 ====
         $display("[Layer 0] Conv3x3 3->32 stride2");

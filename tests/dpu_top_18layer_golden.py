@@ -223,9 +223,12 @@ def main():
 
     write_hex8_file(out_dir / "final_output_expected.hex", current_fmap.flatten())
 
-    with open(out_dir / "scale.hex", 'w') as f:
-        f.write(f"{scale & 0xff:02x}\n")
-        f.write(f"{(scale >> 8) & 0xff:02x}\n")
+    # Export per-layer scales (18 entries x 2 bytes LE = 36 hex lines)
+    with open(out_dir / "scales.hex", 'w') as f:
+        for li in range(18):
+            s = scale & 0xffff
+            f.write(f"{s & 0xff:02x}\n")
+            f.write(f"{(s >> 8) & 0xff:02x}\n")
 
     print(f"\nFinal output shape: {current_fmap.shape}")
     print(f"Files written to: {out_dir}")

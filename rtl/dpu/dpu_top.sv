@@ -10,6 +10,11 @@
 //   cmd_type 3 = set_layer  (cmd_data[4:0] -> current_layer_reg)
 //   cmd_type 4 = run_all    (run layers 0..17 sequentially)
 //   cmd_type 5 = write_scale(cmd_data -> scale_reg bytes, addr selects byte)
+//   cmd_type 6 = write_layer_desc(addr[8:4]=layer, addr[3:0]=field, data)
+//                field: 0=type, 1=c_in_lo, 2=c_in_hi, 3=c_out_lo, 4=c_out_hi,
+//                       5=h_in_lo, 6=h_in_hi, 7=w_in_lo, 8=w_in_hi,
+//                       9=h_out_lo, 10=h_out_hi, 11=w_out_lo, 12=w_out_hi,
+//                       13=stride, 14=scale_lo, 15=scale_hi
 `default_nettype none
 
 module dpu_top #(
@@ -85,7 +90,7 @@ module dpu_top #(
     localparam int H_L17 = H_L16/2;
     localparam int W_L17 = W_L16/2;
 
-    // Descriptor arrays
+    // Descriptor arrays (writable via cmd_type 6)
     logic [2:0]  ld_type  [0:17];
     logic [10:0] ld_c_in  [0:17];
     logic [10:0] ld_c_out [0:17];
@@ -97,26 +102,27 @@ module dpu_top #(
     logic [10:0] ld_macs  [0:17];
     logic [2:0]  ld_src_a [0:17];
     logic [2:0]  ld_src_b [0:17];
+    logic [15:0] ld_scale [0:17];
 
     initial begin
-        ld_type[0]=LT_CONV3X3; ld_c_in[0]=3;   ld_c_out[0]=32;  ld_h_in[0]=H0;   ld_w_in[0]=W0;   ld_h_out[0]=H_L0;  ld_w_out[0]=W_L0;  ld_stride[0]=2; ld_macs[0]=27;   ld_src_a[0]=0; ld_src_b[0]=0;
-        ld_type[1]=LT_CONV3X3; ld_c_in[1]=32;  ld_c_out[1]=64;  ld_h_in[1]=H_L0; ld_w_in[1]=W_L0; ld_h_out[1]=H_L1;  ld_w_out[1]=W_L1;  ld_stride[1]=2; ld_macs[1]=288;  ld_src_a[1]=0; ld_src_b[1]=0;
-        ld_type[2]=LT_CONV3X3; ld_c_in[2]=64;  ld_c_out[2]=64;  ld_h_in[2]=H_L1; ld_w_in[2]=W_L1; ld_h_out[2]=H_L2;  ld_w_out[2]=W_L2;  ld_stride[2]=1; ld_macs[2]=576;  ld_src_a[2]=0; ld_src_b[2]=0;
-        ld_type[3]=LT_ROUTE_SPLIT; ld_c_in[3]=64; ld_c_out[3]=32; ld_h_in[3]=H_L2; ld_w_in[3]=W_L2; ld_h_out[3]=H_L3; ld_w_out[3]=W_L3; ld_stride[3]=0; ld_macs[3]=0; ld_src_a[3]=0; ld_src_b[3]=0;
-        ld_type[4]=LT_CONV3X3; ld_c_in[4]=32;  ld_c_out[4]=32;  ld_h_in[4]=H_L3; ld_w_in[4]=W_L3; ld_h_out[4]=H_L4;  ld_w_out[4]=W_L4;  ld_stride[4]=1; ld_macs[4]=288;  ld_src_a[4]=0; ld_src_b[4]=0;
-        ld_type[5]=LT_CONV3X3; ld_c_in[5]=32;  ld_c_out[5]=32;  ld_h_in[5]=H_L3; ld_w_in[5]=W_L3; ld_h_out[5]=H_L5;  ld_w_out[5]=W_L5;  ld_stride[5]=1; ld_macs[5]=288;  ld_src_a[5]=0; ld_src_b[5]=0;
-        ld_type[6]=LT_ROUTE_CONCAT; ld_c_in[6]=32; ld_c_out[6]=64; ld_h_in[6]=H_L5; ld_w_in[6]=W_L5; ld_h_out[6]=H_L6; ld_w_out[6]=W_L6; ld_stride[6]=0; ld_macs[6]=0; ld_src_a[6]=0; ld_src_b[6]=2;
-        ld_type[7]=LT_CONV1X1; ld_c_in[7]=64;  ld_c_out[7]=64;  ld_h_in[7]=H_L6; ld_w_in[7]=W_L6; ld_h_out[7]=H_L7;  ld_w_out[7]=W_L7;  ld_stride[7]=1; ld_macs[7]=64;   ld_src_a[7]=0; ld_src_b[7]=0;
-        ld_type[8]=LT_ROUTE_CONCAT; ld_c_in[8]=64; ld_c_out[8]=128; ld_h_in[8]=H_L7; ld_w_in[8]=W_L7; ld_h_out[8]=H_L8; ld_w_out[8]=W_L8; ld_stride[8]=0; ld_macs[8]=0; ld_src_a[8]=1; ld_src_b[8]=0;
-        ld_type[9]=LT_MAXPOOL; ld_c_in[9]=128; ld_c_out[9]=128; ld_h_in[9]=H_L8; ld_w_in[9]=W_L8; ld_h_out[9]=H_L9; ld_w_out[9]=W_L9; ld_stride[9]=2; ld_macs[9]=0; ld_src_a[9]=0; ld_src_b[9]=0;
-        ld_type[10]=LT_CONV3X3; ld_c_in[10]=128; ld_c_out[10]=128; ld_h_in[10]=H_L9; ld_w_in[10]=W_L9; ld_h_out[10]=H_L10; ld_w_out[10]=W_L10; ld_stride[10]=1; ld_macs[10]=1152; ld_src_a[10]=0; ld_src_b[10]=0;
-        ld_type[11]=LT_ROUTE_SPLIT; ld_c_in[11]=128; ld_c_out[11]=64; ld_h_in[11]=H_L10; ld_w_in[11]=W_L10; ld_h_out[11]=H_L11; ld_w_out[11]=W_L11; ld_stride[11]=0; ld_macs[11]=0; ld_src_a[11]=0; ld_src_b[11]=0;
-        ld_type[12]=LT_CONV3X3; ld_c_in[12]=64; ld_c_out[12]=64; ld_h_in[12]=H_L11; ld_w_in[12]=W_L11; ld_h_out[12]=H_L12; ld_w_out[12]=W_L12; ld_stride[12]=1; ld_macs[12]=576; ld_src_a[12]=0; ld_src_b[12]=0;
-        ld_type[13]=LT_CONV3X3; ld_c_in[13]=64; ld_c_out[13]=64; ld_h_in[13]=H_L11; ld_w_in[13]=W_L11; ld_h_out[13]=H_L13; ld_w_out[13]=W_L13; ld_stride[13]=1; ld_macs[13]=576; ld_src_a[13]=0; ld_src_b[13]=0;
-        ld_type[14]=LT_ROUTE_CONCAT; ld_c_in[14]=64; ld_c_out[14]=128; ld_h_in[14]=H_L13; ld_w_in[14]=W_L13; ld_h_out[14]=H_L14; ld_w_out[14]=W_L14; ld_stride[14]=0; ld_macs[14]=0; ld_src_a[14]=0; ld_src_b[14]=4;
-        ld_type[15]=LT_CONV1X1; ld_c_in[15]=128; ld_c_out[15]=128; ld_h_in[15]=H_L14; ld_w_in[15]=W_L14; ld_h_out[15]=H_L15; ld_w_out[15]=W_L15; ld_stride[15]=1; ld_macs[15]=128; ld_src_a[15]=0; ld_src_b[15]=0;
-        ld_type[16]=LT_ROUTE_CONCAT; ld_c_in[16]=128; ld_c_out[16]=256; ld_h_in[16]=H_L15; ld_w_in[16]=W_L15; ld_h_out[16]=H_L16; ld_w_out[16]=W_L16; ld_stride[16]=0; ld_macs[16]=0; ld_src_a[16]=3; ld_src_b[16]=0;
-        ld_type[17]=LT_MAXPOOL; ld_c_in[17]=256; ld_c_out[17]=256; ld_h_in[17]=H_L16; ld_w_in[17]=W_L16; ld_h_out[17]=H_L17; ld_w_out[17]=W_L17; ld_stride[17]=2; ld_macs[17]=0; ld_src_a[17]=0; ld_src_b[17]=0;
+        ld_type[0]=LT_CONV3X3; ld_c_in[0]=3;   ld_c_out[0]=32;  ld_h_in[0]=H0;   ld_w_in[0]=W0;   ld_h_out[0]=H_L0;  ld_w_out[0]=W_L0;  ld_stride[0]=2; ld_macs[0]=27;   ld_src_a[0]=0; ld_src_b[0]=0; ld_scale[0]=16'd655;
+        ld_type[1]=LT_CONV3X3; ld_c_in[1]=32;  ld_c_out[1]=64;  ld_h_in[1]=H_L0; ld_w_in[1]=W_L0; ld_h_out[1]=H_L1;  ld_w_out[1]=W_L1;  ld_stride[1]=2; ld_macs[1]=288;  ld_src_a[1]=0; ld_src_b[1]=0; ld_scale[1]=16'd655;
+        ld_type[2]=LT_CONV3X3; ld_c_in[2]=64;  ld_c_out[2]=64;  ld_h_in[2]=H_L1; ld_w_in[2]=W_L1; ld_h_out[2]=H_L2;  ld_w_out[2]=W_L2;  ld_stride[2]=1; ld_macs[2]=576;  ld_src_a[2]=0; ld_src_b[2]=0; ld_scale[2]=16'd655;
+        ld_type[3]=LT_ROUTE_SPLIT; ld_c_in[3]=64; ld_c_out[3]=32; ld_h_in[3]=H_L2; ld_w_in[3]=W_L2; ld_h_out[3]=H_L3; ld_w_out[3]=W_L3; ld_stride[3]=0; ld_macs[3]=0; ld_src_a[3]=0; ld_src_b[3]=0; ld_scale[3]=16'd655;
+        ld_type[4]=LT_CONV3X3; ld_c_in[4]=32;  ld_c_out[4]=32;  ld_h_in[4]=H_L3; ld_w_in[4]=W_L3; ld_h_out[4]=H_L4;  ld_w_out[4]=W_L4;  ld_stride[4]=1; ld_macs[4]=288;  ld_src_a[4]=0; ld_src_b[4]=0; ld_scale[4]=16'd655;
+        ld_type[5]=LT_CONV3X3; ld_c_in[5]=32;  ld_c_out[5]=32;  ld_h_in[5]=H_L3; ld_w_in[5]=W_L3; ld_h_out[5]=H_L5;  ld_w_out[5]=W_L5;  ld_stride[5]=1; ld_macs[5]=288;  ld_src_a[5]=0; ld_src_b[5]=0; ld_scale[5]=16'd655;
+        ld_type[6]=LT_ROUTE_CONCAT; ld_c_in[6]=32; ld_c_out[6]=64; ld_h_in[6]=H_L5; ld_w_in[6]=W_L5; ld_h_out[6]=H_L6; ld_w_out[6]=W_L6; ld_stride[6]=0; ld_macs[6]=0; ld_src_a[6]=0; ld_src_b[6]=2; ld_scale[6]=16'd655;
+        ld_type[7]=LT_CONV1X1; ld_c_in[7]=64;  ld_c_out[7]=64;  ld_h_in[7]=H_L6; ld_w_in[7]=W_L6; ld_h_out[7]=H_L7;  ld_w_out[7]=W_L7;  ld_stride[7]=1; ld_macs[7]=64;   ld_src_a[7]=0; ld_src_b[7]=0; ld_scale[7]=16'd655;
+        ld_type[8]=LT_ROUTE_CONCAT; ld_c_in[8]=64; ld_c_out[8]=128; ld_h_in[8]=H_L7; ld_w_in[8]=W_L7; ld_h_out[8]=H_L8; ld_w_out[8]=W_L8; ld_stride[8]=0; ld_macs[8]=0; ld_src_a[8]=1; ld_src_b[8]=0; ld_scale[8]=16'd655;
+        ld_type[9]=LT_MAXPOOL; ld_c_in[9]=128; ld_c_out[9]=128; ld_h_in[9]=H_L8; ld_w_in[9]=W_L8; ld_h_out[9]=H_L9; ld_w_out[9]=W_L9; ld_stride[9]=2; ld_macs[9]=0; ld_src_a[9]=0; ld_src_b[9]=0; ld_scale[9]=16'd655;
+        ld_type[10]=LT_CONV3X3; ld_c_in[10]=128; ld_c_out[10]=128; ld_h_in[10]=H_L9; ld_w_in[10]=W_L9; ld_h_out[10]=H_L10; ld_w_out[10]=W_L10; ld_stride[10]=1; ld_macs[10]=1152; ld_src_a[10]=0; ld_src_b[10]=0; ld_scale[10]=16'd655;
+        ld_type[11]=LT_ROUTE_SPLIT; ld_c_in[11]=128; ld_c_out[11]=64; ld_h_in[11]=H_L10; ld_w_in[11]=W_L10; ld_h_out[11]=H_L11; ld_w_out[11]=W_L11; ld_stride[11]=0; ld_macs[11]=0; ld_src_a[11]=0; ld_src_b[11]=0; ld_scale[11]=16'd655;
+        ld_type[12]=LT_CONV3X3; ld_c_in[12]=64; ld_c_out[12]=64; ld_h_in[12]=H_L11; ld_w_in[12]=W_L11; ld_h_out[12]=H_L12; ld_w_out[12]=W_L12; ld_stride[12]=1; ld_macs[12]=576; ld_src_a[12]=0; ld_src_b[12]=0; ld_scale[12]=16'd655;
+        ld_type[13]=LT_CONV3X3; ld_c_in[13]=64; ld_c_out[13]=64; ld_h_in[13]=H_L11; ld_w_in[13]=W_L11; ld_h_out[13]=H_L13; ld_w_out[13]=W_L13; ld_stride[13]=1; ld_macs[13]=576; ld_src_a[13]=0; ld_src_b[13]=0; ld_scale[13]=16'd655;
+        ld_type[14]=LT_ROUTE_CONCAT; ld_c_in[14]=64; ld_c_out[14]=128; ld_h_in[14]=H_L13; ld_w_in[14]=W_L13; ld_h_out[14]=H_L14; ld_w_out[14]=W_L14; ld_stride[14]=0; ld_macs[14]=0; ld_src_a[14]=0; ld_src_b[14]=4; ld_scale[14]=16'd655;
+        ld_type[15]=LT_CONV1X1; ld_c_in[15]=128; ld_c_out[15]=128; ld_h_in[15]=H_L14; ld_w_in[15]=W_L14; ld_h_out[15]=H_L15; ld_w_out[15]=W_L15; ld_stride[15]=1; ld_macs[15]=128; ld_src_a[15]=0; ld_src_b[15]=0; ld_scale[15]=16'd655;
+        ld_type[16]=LT_ROUTE_CONCAT; ld_c_in[16]=128; ld_c_out[16]=256; ld_h_in[16]=H_L15; ld_w_in[16]=W_L15; ld_h_out[16]=H_L16; ld_w_out[16]=W_L16; ld_stride[16]=0; ld_macs[16]=0; ld_src_a[16]=3; ld_src_b[16]=0; ld_scale[16]=16'd655;
+        ld_type[17]=LT_MAXPOOL; ld_c_in[17]=256; ld_c_out[17]=256; ld_h_in[17]=H_L16; ld_w_in[17]=W_L16; ld_h_out[17]=H_L17; ld_w_out[17]=W_L17; ld_stride[17]=2; ld_macs[17]=0; ld_src_a[17]=0; ld_src_b[17]=0; ld_scale[17]=16'd655;
     end
 
     // =========================================================================
@@ -355,11 +361,36 @@ module dpu_top #(
                                 ping_pong <= 1'b0;
                                 state <= S_LAYER_INIT;
                             end
-                            3'd5: begin // write_scale
-                                if (cmd_addr[0] == 1'b0)
+                            3'd5: begin // write_scale (also updates current layer's ld_scale)
+                                if (cmd_addr[0] == 1'b0) begin
                                     scale_reg[7:0]  <= cmd_data;
-                                else
+                                    ld_scale[current_layer_reg][7:0] <= cmd_data;
+                                end else begin
                                     scale_reg[15:8] <= cmd_data;
+                                    ld_scale[current_layer_reg][15:8] <= cmd_data;
+                                end
+                                state <= S_WRITE_ACK;
+                            end
+                            3'd6: begin // write_layer_desc
+                                // addr[8:4] = layer index, addr[3:0] = field
+                                case (cmd_addr[3:0])
+                                    4'd0:  ld_type  [cmd_addr[8:4]] <= cmd_data[2:0];
+                                    4'd1:  ld_c_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd2:  ld_c_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd3:  ld_c_out [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd4:  ld_c_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd5:  ld_h_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd6:  ld_h_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd7:  ld_w_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd8:  ld_w_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd9:  ld_h_out [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd10: ld_h_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd11: ld_w_out [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd12: ld_w_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd13: ld_stride[cmd_addr[8:4]] <= cmd_data[1:0];
+                                    4'd14: ld_scale [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd15: ld_scale [cmd_addr[8:4]][15:8] <= cmd_data;
+                                endcase
                                 state <= S_WRITE_ACK;
                             end
                             default: cmd_ready <= 1'b1;
@@ -390,6 +421,7 @@ module dpu_top #(
                     cur_macs   <= ld_macs  [current_layer_reg];
                     cur_src_a  <= ld_src_a [current_layer_reg];
                     cur_src_b  <= ld_src_b [current_layer_reg];
+                    scale_reg  <= ld_scale [current_layer_reg];
 
                     // Determine kernel size
                     if (ld_type[current_layer_reg] == LT_CONV3X3)
