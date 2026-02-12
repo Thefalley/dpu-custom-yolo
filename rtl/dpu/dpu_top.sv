@@ -5,16 +5,22 @@
 //
 // CMD interface (byte-at-a-time):
 //   cmd_type 0 = write_byte (addr, data)
-//   cmd_type 1 = run_layer  (runs current_layer_reg)
+//   cmd_type 1 = run_layer  (runs current_layer_reg; also "continue" in run_all)
 //   cmd_type 2 = read_byte  (addr -> rsp_data)
 //   cmd_type 3 = set_layer  (cmd_data[4:0] -> current_layer_reg)
-//   cmd_type 4 = run_all    (run layers 0..17 sequentially)
+//   cmd_type 4 = run_all    (run layers 0..17; pauses before conv layers for
+//                             weight reload, auto-advances route/maxpool)
 //   cmd_type 5 = write_scale(cmd_data -> scale_reg bytes, addr selects byte)
 //   cmd_type 6 = write_layer_desc(addr[8:4]=layer, addr[3:0]=field, data)
 //                field: 0=type, 1=c_in_lo, 2=c_in_hi, 3=c_out_lo, 4=c_out_hi,
 //                       5=h_in_lo, 6=h_in_hi, 7=w_in_lo, 8=w_in_hi,
 //                       9=h_out_lo, 10=h_out_hi, 11=w_out_lo, 12=w_out_hi,
 //                       13=stride, 14=scale_lo, 15=scale_hi
+//
+// run_all flow: Host sends cmd_type 4. DPU runs layer 0. If next layer is
+// conv, DPU asserts reload_req and accepts write_byte(0)/write_scale(5)/
+// write_layer_desc(6). Host loads weights, then sends run_layer(1) to continue.
+// Route/maxpool layers auto-advance without host intervention.
 `default_nettype none
 
 module dpu_top #(
@@ -38,7 +44,8 @@ module dpu_top #(
     output logic [7:0]  rsp_data,
     output logic        busy,
     output logic        done,
-    output logic [4:0]  current_layer
+    output logic [4:0]  current_layer,
+    output logic        reload_req    // asserted when waiting for weight load in run_all
 );
 
     // =========================================================================
@@ -243,6 +250,7 @@ module dpu_top #(
         S_ROUTE_DONE,
         S_SAVE_FMAP,
         S_LAYER_DONE,
+        S_LAYER_RELOAD,
         S_ALL_DONE
     } state_t;
     state_t state;
@@ -293,6 +301,7 @@ module dpu_top #(
             current_layer_reg <= 5'd0;
             ping_pong       <= 1'b0;
             run_all_mode    <= 1'b0;
+            reload_req      <= 1'b0;
             oh <= 0; ow <= 0;
             load_c <= 0; load_ky <= 0; load_kx <= 0; load_idx <= 0;
             copy_idx <= 0; save_idx <= 0;
@@ -307,6 +316,7 @@ module dpu_top #(
             done       <= 1'b0;
             eng_start  <= 1'b0;
             pool_valid <= 1'b0;
+            reload_req <= 1'b0;
 
             // Latch engine done pulse (cleared when consumed)
             if (eng_done)
@@ -790,10 +800,95 @@ module dpu_top #(
                             state <= S_ALL_DONE;
                         end else begin
                             current_layer_reg <= current_layer_reg + 5'd1;
-                            state <= S_LAYER_INIT;
+                            // Conv layers need weight reload; route/maxpool auto-advance
+                            if (ld_type[current_layer_reg + 5'd1] == LT_CONV3X3 ||
+                                ld_type[current_layer_reg + 5'd1] == LT_CONV1X1) begin
+                                state <= S_LAYER_RELOAD;
+                            end else begin
+                                state <= S_LAYER_INIT;
+                            end
                         end
                     end else begin
                         state <= S_ALL_DONE;
+                    end
+                end
+
+                // =============================================================
+                // LAYER_RELOAD: Wait for host to load weights, then continue
+                // Accepts write_byte(0), write_scale(5), write_layer_desc(6)
+                // run_layer(1) continues to next layer
+                // =============================================================
+                S_LAYER_RELOAD: begin
+                    cmd_ready  <= 1'b1;
+                    reload_req <= 1'b1;
+                    if (cmd_valid) begin
+                        case (cmd_type)
+                            3'd0: begin // write_byte (weight/bias loading)
+                                if (cmd_addr < MAX_WBUF) begin
+                                    weight_buf[cmd_addr] <= $signed(cmd_data);
+                                end else if (cmd_addr < MAX_WBUF + MAX_CH*4) begin
+                                    tmp_boff = cmd_addr - MAX_WBUF;
+                                    tmp_bch  = tmp_boff >> 2;
+                                    tmp_bsel = tmp_boff & 3;
+                                    case (tmp_bsel)
+                                        0: bias_buf[tmp_bch][7:0]   <= cmd_data;
+                                        1: bias_buf[tmp_bch][15:8]  <= cmd_data;
+                                        2: bias_buf[tmp_bch][23:16] <= cmd_data;
+                                        3: bias_buf[tmp_bch][31:24] <= cmd_data;
+                                    endcase
+                                end
+                                state <= S_LAYER_RELOAD;
+                                cmd_ready <= 1'b0;
+                                // Need a 1-cycle ack then back to reload
+                            end
+                            3'd1: begin // run_layer -> continue to next layer
+                                reload_req <= 1'b0;
+                                state <= S_LAYER_INIT;
+                            end
+                            3'd2: begin // read_byte (check outputs during reload)
+                                if (ping_pong == 1'b0)
+                                    rsp_data <= fmap_a[cmd_addr];
+                                else
+                                    rsp_data <= fmap_b[cmd_addr];
+                                rsp_valid <= 1'b1;
+                                // Stay in LAYER_RELOAD after read
+                                cmd_ready <= 1'b0;
+                            end
+                            3'd5: begin // write_scale
+                                if (cmd_addr[0] == 1'b0) begin
+                                    scale_reg[7:0]  <= cmd_data;
+                                    ld_scale[current_layer_reg][7:0] <= cmd_data;
+                                end else begin
+                                    scale_reg[15:8] <= cmd_data;
+                                    ld_scale[current_layer_reg][15:8] <= cmd_data;
+                                end
+                                state <= S_LAYER_RELOAD;
+                                cmd_ready <= 1'b0;
+                            end
+                            3'd6: begin // write_layer_desc
+                                case (cmd_addr[3:0])
+                                    4'd0:  ld_type  [cmd_addr[8:4]] <= cmd_data[2:0];
+                                    4'd1:  ld_c_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd2:  ld_c_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd3:  ld_c_out [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd4:  ld_c_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd5:  ld_h_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd6:  ld_h_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd7:  ld_w_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd8:  ld_w_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd9:  ld_h_out [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd10: ld_h_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd11: ld_w_out [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd12: ld_w_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
+                                    4'd13: ld_stride[cmd_addr[8:4]] <= cmd_data[1:0];
+                                    4'd14: ld_scale [cmd_addr[8:4]][7:0]  <= cmd_data;
+                                    4'd15: ld_scale [cmd_addr[8:4]][15:8] <= cmd_data;
+                                endcase
+                                state <= S_LAYER_RELOAD;
+                                cmd_ready <= 1'b0;
+                            end
+                            default: ;
+                        endcase
                     end
                 end
 
