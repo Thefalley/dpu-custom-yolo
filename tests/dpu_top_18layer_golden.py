@@ -138,12 +138,29 @@ def load_real_weights():
     return weights, biases
 
 
+def load_input_image(image_path):
+    """Load a real image, resize to H0xW0, convert to INT8 CHW format."""
+    from PIL import Image
+    img = Image.open(image_path).convert('RGB')
+    img = img.resize((W0, H0), Image.BILINEAR)
+    arr = np.array(img, dtype=np.float32)  # HWC, 0-255
+    # YOLOv4-tiny normalizes to [0,1] then processes; we map to signed INT8 [-128,127]
+    # Center around 0: pixel_int8 = round(pixel / 255 * 254 - 127)
+    arr = np.round(arr / 255.0 * 254.0 - 127.0)
+    arr = np.clip(arr, -128, 127).astype(np.int8)
+    # HWC -> CHW
+    arr = arr.transpose(2, 0, 1)
+    return arr
+
+
 def main():
     parser = argparse.ArgumentParser(description='DPU 18-layer golden model')
     parser.add_argument('--real-weights', action='store_true',
                         help='Use real YOLOv4-tiny quantized weights')
     parser.add_argument('--per-layer-scale', action='store_true',
                         help='Calibrate per-layer requant scale (auto with --real-weights)')
+    parser.add_argument('--input-image', type=str, default=None,
+                        help='Path to input image (resized to H0xW0, converted to INT8)')
     args = parser.parse_args()
     use_per_layer_scale = args.per_layer_scale or args.real_weights
 
@@ -152,8 +169,13 @@ def main():
     out_dir = PROJECT_ROOT / "image_sim_out" / "dpu_top"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate input image (synthetic for both modes)
-    input_img = np.random.randint(-50, 50, (3, H0, W0), dtype=np.int8)
+    # Generate or load input image
+    if args.input_image:
+        print(f"[INPUT] Loading image: {args.input_image}")
+        input_img = load_input_image(args.input_image)
+        print(f"  Resized to {W0}x{H0}, range=[{input_img.min()}, {input_img.max()}]")
+    else:
+        input_img = np.random.randint(-50, 50, (3, H0, W0), dtype=np.int8)
     write_hex8_file(out_dir / "input_image.hex", input_img.flatten())
 
     # Storage

@@ -45,7 +45,8 @@ module dpu_top #(
     output logic        busy,
     output logic        done,
     output logic [4:0]  current_layer,
-    output logic        reload_req    // asserted when waiting for weight load in run_all
+    output logic        reload_req,   // asserted when waiting for weight load in run_all
+    output logic [31:0] perf_total_cycles  // total compute cycles (busy high)
 );
 
     // =========================================================================
@@ -154,11 +155,21 @@ module dpu_top #(
 
     reg signed [7:0] patch_buf [0:1151];
 
+    // Performance counters
+    reg [31:0] cycle_counter;
+    reg [31:0] layer_start_cycle;
+    reg [31:0] layer_cycles [0:17];
+    assign perf_total_cycles = cycle_counter;
+
     integer init_i;
     initial begin
         for (init_i = 0; init_i < MAX_CH; init_i = init_i + 1)
             bias_buf[init_i] = 32'sd0;
         scale_reg = 16'd655;
+        cycle_counter = 32'd0;
+        layer_start_cycle = 32'd0;
+        for (init_i = 0; init_i < 18; init_i = init_i + 1)
+            layer_cycles[init_i] = 32'd0;
     end
 
     // =========================================================================
@@ -302,6 +313,8 @@ module dpu_top #(
             ping_pong       <= 1'b0;
             run_all_mode    <= 1'b0;
             reload_req      <= 1'b0;
+            cycle_counter   <= 32'd0;
+            layer_start_cycle <= 32'd0;
             oh <= 0; ow <= 0;
             load_c <= 0; load_ky <= 0; load_kx <= 0; load_idx <= 0;
             copy_idx <= 0; save_idx <= 0;
@@ -317,6 +330,10 @@ module dpu_top #(
             eng_start  <= 1'b0;
             pool_valid <= 1'b0;
             reload_req <= 1'b0;
+
+            // Performance counter: increment when busy
+            if (busy)
+                cycle_counter <= cycle_counter + 32'd1;
 
             // Latch engine done pulse (cleared when consumed)
             if (eng_done)
@@ -369,6 +386,7 @@ module dpu_top #(
                                 run_all_mode <= 1'b1;
                                 current_layer_reg <= 5'd0;
                                 ping_pong <= 1'b0;
+                                cycle_counter <= 32'd0;
                                 state <= S_LAYER_INIT;
                             end
                             3'd5: begin // write_scale (also updates current layer's ld_scale)
@@ -420,6 +438,7 @@ module dpu_top #(
 
                 // =============================================================
                 S_LAYER_INIT: begin
+                    layer_start_cycle <= cycle_counter;
                     cur_type   <= ld_type  [current_layer_reg];
                     cur_c_in   <= ld_c_in  [current_layer_reg];
                     cur_c_out  <= ld_c_out [current_layer_reg];
@@ -794,6 +813,7 @@ module dpu_top #(
                 // =============================================================
                 S_LAYER_DONE: begin
                     ping_pong <= ~ping_pong;
+                    layer_cycles[current_layer_reg] <= cycle_counter - layer_start_cycle;
 
                     if (run_all_mode) begin
                         if (current_layer_reg == 5'd17) begin

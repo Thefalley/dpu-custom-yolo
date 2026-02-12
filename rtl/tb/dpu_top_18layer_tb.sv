@@ -23,6 +23,7 @@ module dpu_top_18layer_tb;
     logic        busy, dut_done;
     logic [4:0]  current_layer;
     logic        reload_req;
+    logic [31:0] perf_total_cycles;
 
     dpu_top #(
         .H0(H0), .W0(W0),
@@ -33,7 +34,8 @@ module dpu_top_18layer_tb;
         .cmd_type(cmd_type), .cmd_addr(cmd_addr), .cmd_data(cmd_data),
         .rsp_valid(rsp_valid), .rsp_data(rsp_data),
         .busy(busy), .done(dut_done), .current_layer(current_layer),
-        .reload_req(reload_req)
+        .reload_req(reload_req),
+        .perf_total_cycles(perf_total_cycles)
     );
 
     initial begin clk = 0; forever #5 clk = ~clk; end
@@ -359,6 +361,13 @@ module dpu_top_18layer_tb;
             $display("RESULT: ALL 18 LAYERS PASS");
         else
             $display("RESULT: %0d LAYERS FAILED", errs);
+
+        // ---- Performance Report ----
+        $display("");
+        $display("=== PERFORMANCE (cycles) ===");
+        for (i = 0; i < 18; i = i + 1)
+            $display("  Layer %2d: %0d cycles", i, u_dut.layer_cycles[i]);
+        $display("  TOTAL compute: %0d cycles", perf_total_cycles);
 
         $finish;
     end

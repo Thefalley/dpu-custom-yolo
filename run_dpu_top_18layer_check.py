@@ -19,10 +19,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.resolve()
 
 
-def run_golden(real_weights=False):
+def run_golden(real_weights=False, input_image=None):
     cmd = [sys.executable, str(PROJECT_ROOT / "tests" / "dpu_top_18layer_golden.py")]
     if real_weights:
         cmd.append("--real-weights")
+    if input_image:
+        cmd.extend(["--input-image", input_image])
     r = subprocess.run(
         cmd,
         cwd=PROJECT_ROOT,
@@ -64,15 +66,18 @@ def main():
     ap = argparse.ArgumentParser(description="DPU Top 18-layer check")
     ap.add_argument("--python-only", action="store_true", help="Skip RTL simulation")
     ap.add_argument("--real-weights", action="store_true", help="Use real YOLOv4-tiny weights")
+    ap.add_argument("--input-image", type=str, default=None, help="Path to input image")
     args = ap.parse_args()
 
     mode = "REAL weights" if args.real_weights else "synthetic weights"
+    if args.input_image:
+        mode += f" + image: {Path(args.input_image).name}"
     print("=" * 60)
     print(f"DPU Top 18-Layer Check (H0=16, W0=16) [{mode}]")
     print("=" * 60)
 
     print("\n[1] Python golden model")
-    ok, out = run_golden(real_weights=args.real_weights)
+    ok, out = run_golden(real_weights=args.real_weights, input_image=args.input_image)
     if not ok:
         print("  [FAIL] Golden model failed")
         for line in out.strip().splitlines():
