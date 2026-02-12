@@ -218,7 +218,10 @@ def main():
                                                   stride=stride, kernel_size=3)
             out = conv_bn_leaky_hw(current_fmap, weights[i], biases[i],
                                    stride=stride, kernel_size=3, scale=layer_scales[i])
-            write_hex8_file(out_dir / f"layer{i}_weights.hex", weights[i].flatten())
+            # Export weights in cin-contiguous layout: [co][kpos][cin]
+            # Original: [co][cin][ky][kx] -> transpose to [co][ky][kx][cin] then flatten
+            w_reordered = weights[i].transpose(0, 2, 3, 1)  # [co][ky][kx][cin]
+            write_hex8_file(out_dir / f"layer{i}_weights.hex", w_reordered.flatten())
             write_bias_hex(out_dir / f"layer{i}_bias.hex", biases[i])
 
         elif ltype == 'conv1x1':
@@ -227,7 +230,9 @@ def main():
                                                   stride=1, kernel_size=1)
             out = conv_bn_leaky_hw(current_fmap, weights[i], biases[i],
                                    stride=1, kernel_size=1, scale=layer_scales[i])
-            write_hex8_file(out_dir / f"layer{i}_weights.hex", weights[i].flatten())
+            # 1x1: [co][ci][1][1] -> [co][ci] (kpos=0 only, cin-contiguous)
+            write_hex8_file(out_dir / f"layer{i}_weights.hex",
+                            weights[i].reshape(c_out, c_in).flatten())
             write_bias_hex(out_dir / f"layer{i}_bias.hex", biases[i])
 
         elif ltype == 'route_split':

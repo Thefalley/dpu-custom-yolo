@@ -197,9 +197,9 @@ module dpu_top #(
     // Latched pulse signals (1-cycle pulses that may arrive while busy)
     logic        eng_done_latched;
     logic [10:0] eng_patch_rd_addr;
-    logic signed [7:0] eng_patch_rd_data;
+    wire [255:0] eng_patch_rd_data_wide;
     logic [17:0] eng_weight_rd_addr;
-    logic signed [7:0] eng_weight_rd_data;
+    wire [255:0] eng_weight_rd_data_wide;
     logic [8:0]  eng_bias_rd_ch;
     logic signed [31:0] eng_bias_rd_data;
 
@@ -208,9 +208,9 @@ module dpu_top #(
         .c_in(cur_c_in), .c_out(cur_c_out),
         .kernel_size(cur_kernel_size),
         .patch_rd_addr(eng_patch_rd_addr),
-        .patch_rd_data(eng_patch_rd_data),
+        .patch_rd_data_wide(eng_patch_rd_data_wide),
         .weight_rd_addr(eng_weight_rd_addr),
-        .weight_rd_data(eng_weight_rd_data),
+        .weight_rd_data_wide(eng_weight_rd_data_wide),
         .bias_rd_ch(eng_bias_rd_ch),
         .bias_rd_data(eng_bias_rd_data),
         .scale(scale_reg),
@@ -221,10 +221,15 @@ module dpu_top #(
         .done(eng_done)
     );
 
-    // Wire engine read ports to memories
-    assign eng_patch_rd_data  = patch_buf[eng_patch_rd_addr];
-    assign eng_weight_rd_data = weight_buf[eng_weight_rd_addr];
-    assign eng_bias_rd_data   = bias_buf[eng_bias_rd_ch];
+    // Wide (32-byte) read ports: provide 32 consecutive bytes from base address
+    genvar gi;
+    generate
+        for (gi = 0; gi < 32; gi = gi + 1) begin : gen_wide_rd
+            assign eng_weight_rd_data_wide[gi*8 +: 8] = weight_buf[eng_weight_rd_addr + gi];
+            assign eng_patch_rd_data_wide[gi*8 +: 8]  = patch_buf[eng_patch_rd_addr + gi];
+        end
+    endgenerate
+    assign eng_bias_rd_data = bias_buf[eng_bias_rd_ch];
 
     // =========================================================================
     // MaxPool unit instance
@@ -475,7 +480,8 @@ module dpu_top #(
 
                 // =============================================================
                 // CONV: Load patch buffer with activations for pixel (oh, ow)
-                // Same addressing as before but only activations (no weights).
+                // Layout: patch_buf[kpos * c_in + c] (cin-contiguous per kpos)
+                // Iterates: for each kpos (0..K*K-1), for each c (0..c_in-1)
                 // load_idx goes 0..macs-1 where macs = c_in * K * K
                 // =============================================================
                 S_CONV_LOAD_PATCH: begin
@@ -492,19 +498,24 @@ module dpu_top #(
                                 patch_buf[load_idx] <= fmap_b[tmp_src_addr];
                         end
 
-                        if (load_kx == 2) begin
-                            load_kx <= 0;
-                            if (load_ky == 2) begin
-                                load_ky <= 0;
-                                load_c <= load_c + 1;
-                            end else begin
-                                load_ky <= load_ky + 1;
-                            end
+                        // Iterate: inner loop = c (0..c_in-1), outer loop = kpos
+                        if (load_c + 1 < cur_c_in) begin
+                            load_c <= load_c + 1;
                         end else begin
-                            load_kx <= load_kx + 1;
+                            load_c <= 0;
+                            if (load_kx == 2) begin
+                                load_kx <= 0;
+                                if (load_ky == 2) begin
+                                    load_ky <= 0;
+                                end else begin
+                                    load_ky <= load_ky + 1;
+                                end
+                            end else begin
+                                load_kx <= load_kx + 1;
+                            end
                         end
                     end else begin
-                        // 1x1 conv
+                        // 1x1 conv: kpos=0 only, just iterate c
                         tmp_src_addr = load_c * cur_h_in * cur_w_in + oh * cur_w_in + ow;
                         if (ping_pong == 1'b0)
                             patch_buf[load_idx] <= fmap_a[tmp_src_addr];

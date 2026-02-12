@@ -3,12 +3,16 @@
 //   iterates kernel_pos x Cin tiles, accumulating in the array.
 // After all MACs for a Cout tile, post-processes 32 channels and outputs them.
 //
-// Weight layout (same as original conv_engine):
-//   weight_buf[co * macs_per_ch + c * K*K + ky*K + kx]
+// Weight layout (cin-contiguous per kernel position for wide reads):
+//   weight_buf[co * macs_per_ch + kpos * c_in + c]
 //   where macs_per_ch = c_in * K * K
 //
-// Patch layout (same as original):
-//   patch_buf[c * K*K + kpos]   for both 3x3 and 1x1 (kpos=0 for 1x1)
+// Patch layout (cin-contiguous per kernel position):
+//   patch_buf[kpos * c_in + c]   for both 3x3 and 1x1
+//
+// WIDE MEMORY INTERFACE: reads 32 bytes per cycle from weight and patch buffers.
+// Weight: loads one row (32 input channels) per cycle -> 32 cycles per 32x32 tile.
+// Patch: loads all 32 activations in 1 cycle.
 //
 // NOTE: Module interfaces use packed flat vectors for array outputs because
 // Icarus Verilog does not correctly propagate unpacked array output ports.
@@ -26,12 +30,12 @@ module conv_engine_array #(
     input  logic [10:0] c_in,
     input  logic [10:0] c_out,
     input  logic [3:0]  kernel_size,     // 1 or 3
-    // Patch buffer read (activations) — directly indexed
+    // Patch buffer read (activations) — 32-byte wide
     output logic [10:0] patch_rd_addr,
-    input  logic signed [7:0] patch_rd_data,
-    // Weight buffer read — directly indexed
+    input  logic [255:0] patch_rd_data_wide,  // 32 bytes packed
+    // Weight buffer read — 32-byte wide
     output logic [17:0] weight_rd_addr,
-    input  logic signed [7:0] weight_rd_data,
+    input  logic [255:0] weight_rd_data_wide, // 32 bytes packed
     // Bias buffer read
     output logic [8:0]  bias_rd_ch,
     input  logic signed [31:0] bias_rd_data,
@@ -110,9 +114,9 @@ module conv_engine_array #(
         S_INIT,
         S_BIAS_REQ,
         S_BIAS_LATCH,
-        S_WLOAD_REQ,
+        S_WLOAD_ROW,
         S_WLOAD_LATCH,
-        S_ALOAD_REQ,
+        S_ALOAD,
         S_ALOAD_LATCH,
         S_MAC_FIRE,
         S_MAC_WAIT,
@@ -130,8 +134,7 @@ module conv_engine_array #(
     logic   first_mac;           // first MAC in this Cout tile
 
     // Loading counters
-    integer ld_r, ld_c;         // weight load row/col
-    integer ld_a;               // activation load index
+    integer ld_r;               // weight load row index
     integer ld_b;               // bias load index
 
     // Active dimensions
@@ -155,7 +158,7 @@ module conv_engine_array #(
             out_count      <= 6'd0;
             cout_base <= 0; cin_base <= 0; kpos <= 0;
             first_mac <= 1'b0;
-            ld_r <= 0; ld_c <= 0; ld_a <= 0; ld_b <= 0;
+            ld_r <= 0; ld_b <= 0;
             for (ii = 0; ii < 32; ii = ii + 1) begin
                 arr_acc[ii]      <= 32'sd0;
                 pp_result[ii]    <= 8'sd0;
@@ -191,6 +194,7 @@ module conv_engine_array #(
 
                 // =============================================================
                 // BIAS loading: 2-phase (request / latch) per channel
+                // Bias is 32-bit per channel, small count, keep sequential.
                 // =============================================================
                 S_BIAS_REQ: begin
                     active_rows = (cout_base + 32 <= c_out) ? 32 : (c_out - cout_base);
@@ -206,14 +210,13 @@ module conv_engine_array #(
                         cin_base  <= 0;
                         first_mac <= 1'b1;
                         ld_r      <= 0;
-                        ld_c      <= 0;
                         // Zero w/a regs
                         for (ii = 0; ii < 32; ii = ii + 1) begin
                             act_reg[ii] <= 8'sd0;
                             for (jj = 0; jj < 32; jj = jj + 1)
                                 w_reg[ii*32+jj] <= 8'sd0;
                         end
-                        state <= S_WLOAD_REQ;
+                        state <= S_WLOAD_ROW;
                     end
                 end
 
@@ -224,58 +227,53 @@ module conv_engine_array #(
                 end
 
                 // =============================================================
-                // WEIGHT loading: row-major, 2-phase per element
+                // WEIGHT loading: 32 bytes per cycle (one row of the weight tile).
+                // Issues address, waits 1 cycle for data, then latches 32 bytes.
                 // =============================================================
-                S_WLOAD_REQ: begin
+                S_WLOAD_ROW: begin
                     active_rows = (cout_base + 32 <= c_out) ? 32 : (c_out - cout_base);
-                    cin_actual  = (cin_base + 32 <= c_in)   ? 32 : (c_in - cin_base);
-
                     if (ld_r < active_rows) begin
+                        // Wide read: 32 consecutive cin bytes for this row's (cout, kpos)
                         weight_rd_addr <= (cout_base + ld_r) * macs_per_ch +
-                                         (cin_base + ld_c) * k_sq + kpos;
+                                         kpos * c_in + cin_base;
                         state <= S_WLOAD_LATCH;
                     end else begin
-                        // Weights done, load activations
-                        ld_a  <= 0;
-                        state <= S_ALOAD_REQ;
+                        // All rows done, load activations
+                        state <= S_ALOAD;
                     end
                 end
 
                 S_WLOAD_LATCH: begin
-                    active_rows = (cout_base + 32 <= c_out) ? 32 : (c_out - cout_base);
-                    cin_actual  = (cin_base + 32 <= c_in)   ? 32 : (c_in - cin_base);
-
-                    w_reg[ld_r*32+ld_c] <= weight_rd_data;
-
-                    // Advance to next element
-                    if (ld_c + 1 < cin_actual) begin
-                        ld_c  <= ld_c + 1;
-                    end else begin
-                        ld_c  <= 0;
-                        ld_r  <= ld_r + 1;
+                    cin_actual = (cin_base + 32 <= c_in) ? 32 : (c_in - cin_base);
+                    // Latch 32 bytes from wide read into w_reg[ld_r*32 + 0..31]
+                    for (jj = 0; jj < 32; jj = jj + 1) begin
+                        if (jj < cin_actual)
+                            w_reg[ld_r*32+jj] <= $signed(weight_rd_data_wide[jj*8 +: 8]);
+                        else
+                            w_reg[ld_r*32+jj] <= 8'sd0;
                     end
-                    state <= S_WLOAD_REQ;
+                    ld_r  <= ld_r + 1;
+                    state <= S_WLOAD_ROW;
                 end
 
                 // =============================================================
-                // ACTIVATION loading: 2-phase per element
+                // ACTIVATION loading: 32 bytes in 2 cycles (addr + latch)
                 // =============================================================
-                S_ALOAD_REQ: begin
-                    cin_actual = (cin_base + 32 <= c_in) ? 32 : (c_in - cin_base);
-
-                    if (ld_a < cin_actual) begin
-                        patch_rd_addr <= (cin_base + ld_a) * k_sq + kpos;
-                        state <= S_ALOAD_LATCH;
-                    end else begin
-                        // Activations done, fire MAC
-                        state <= S_MAC_FIRE;
-                    end
+                S_ALOAD: begin
+                    // Wide read: 32 consecutive cin bytes for this kpos
+                    patch_rd_addr <= kpos * c_in + cin_base;
+                    state <= S_ALOAD_LATCH;
                 end
 
                 S_ALOAD_LATCH: begin
-                    act_reg[ld_a] <= patch_rd_data;
-                    ld_a  <= ld_a + 1;
-                    state <= S_ALOAD_REQ;
+                    cin_actual = (cin_base + 32 <= c_in) ? 32 : (c_in - cin_base);
+                    for (jj = 0; jj < 32; jj = jj + 1) begin
+                        if (jj < cin_actual)
+                            act_reg[jj] <= $signed(patch_rd_data_wide[jj*8 +: 8]);
+                        else
+                            act_reg[jj] <= 8'sd0;
+                    end
+                    state <= S_MAC_FIRE;
                 end
 
                 // =============================================================
@@ -293,26 +291,15 @@ module conv_engine_array #(
                         // Next cin tile?
                         if (cin_base + 32 < c_in) begin
                             cin_base <= cin_base + 32;
-                            ld_r <= 0; ld_c <= 0;
-                            // Zero w/a for padding
-                            for (ii = 0; ii < 32; ii = ii + 1) begin
-                                act_reg[ii] <= 8'sd0;
-                                for (jj = 0; jj < 32; jj = jj + 1)
-                                    w_reg[ii*32+jj] <= 8'sd0;
-                            end
-                            state <= S_WLOAD_REQ;
+                            ld_r <= 0;
+                            state <= S_WLOAD_ROW;
                         end
                         // Next kernel pos?
                         else if (kpos + 1 < k_sq) begin
                             kpos     <= kpos + 1;
                             cin_base <= 0;
-                            ld_r <= 0; ld_c <= 0;
-                            for (ii = 0; ii < 32; ii = ii + 1) begin
-                                act_reg[ii] <= 8'sd0;
-                                for (jj = 0; jj < 32; jj = jj + 1)
-                                    w_reg[ii*32+jj] <= 8'sd0;
-                            end
-                            state <= S_WLOAD_REQ;
+                            ld_r <= 0;
+                            state <= S_WLOAD_ROW;
                         end
                         // All MACs done for Cout tile -> capture acc and post-process
                         else begin
