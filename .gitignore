@@ -1,4 +1,8 @@
-# Python
+# ==============================================================================
+# DPU Custom YOLOv4-tiny — .gitignore
+# ==============================================================================
+
+# ---- Python ----
 __pycache__/
 *.py[cod]
 *$py.class
@@ -19,41 +23,74 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
-# Virtual environments
 venv/
 ENV/
 env/
+.ipynb_checkpoints/
 
-# Model files (large binaries)
+# ---- Model weights (large binaries) ----
 *.pt
 *.pth
 *.onnx
 *.tflite
 *.pb
 *.h5
+*.weights
 
-# IDE
+# ---- Verilog simulation artifacts ----
+*.vvp
+*.vcd
+*.fst
+*.log
+sim_out/
+sim_mac
+image_sim_out/
+
+# ---- Simulation debug/temp files ----
+debug_sim_out.txt
+sim_log*.txt
+vvp_out.txt
+vvp_err.txt
+
+# ---- FPGA build outputs ----
+fpga/vivado_project/
+*.bit
+*.bin
+*.ltx
+*.xpr
+*.jou
+.Xil/
+
+# ---- Software build outputs ----
+*.o
+*.a
+*.elf
+dpu_app_sim
+sw/dpu_app_sim
+sw/dpu_app.elf
+
+# ---- IDE ----
 .vscode/
 .idea/
 *.swp
 *.swo
+.claude/
 
-# OS
+# ---- OS ----
 .DS_Store
 Thumbs.db
+NUL
+nul
 
-# Jupyter
-.ipynb_checkpoints/
-
-# Simulation outputs
-*.vcd
-*.fst
-*.log
-
-# Local path to OSS CAD / Icarus (copy .oss_cad_path.example to .oss_cad_path and edit)
+# ---- Local tool config ----
+# Copy .oss_cad_path.example to .oss_cad_path and edit with your path
 .oss_cad_path
 
-# Build outputs
-*.o
-*.a
+# ---- External repos (not submodules) ----
+verilog-sim-py/
+
+# ---- Temporary / scratch files ----
+hello.c
+build_hello.bat
+rtl/tb/dpu_top_mini_tb.sv
+sim_out
