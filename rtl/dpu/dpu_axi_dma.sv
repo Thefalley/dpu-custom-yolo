@@ -18,8 +18,10 @@
 // =============================================================================
 
 module dpu_axi_dma #(
-    parameter int ADDR_BITS  = 24,
-    parameter int AXIS_DATA_W = 32  // AXI-Stream data width (bytes packed)
+    parameter int ADDR_BITS   = 24,
+    parameter int AXIS_DATA_W = 32,  // AXI-Stream data width (bytes packed)
+    parameter int MAX_WBUF    = 147456,
+    parameter int MAX_CH      = 256
 ) (
     input  logic                    clk,
     input  logic                    rst_n,
@@ -58,14 +60,16 @@ module dpu_axi_dma #(
 );
 
     // =========================================================================
-    // Target to cmd_type mapping
+    // Target to cmd_type mapping & address offsets
     // =========================================================================
     // target 0 (weight)     -> cmd_type 0 (write_byte), addr = base + offset
-    // target 1 (fmap_input) -> cmd_type 0 (write_byte), addr = weight_buf_size + base + offset
-    // target 2 (bias)       -> cmd_type 0 (write_byte), addr = bias_base + offset
+    // target 1 (fmap_input) -> cmd_type 0 (write_byte), addr = FMAP_OFFSET + base + offset
+    // target 2 (bias)       -> cmd_type 0 (write_byte), addr = BIAS_OFFSET + base + offset
     // target 3 (scale)      -> cmd_type 5 (write_scale)
     // target 4 (layer_desc) -> cmd_type 6 (write_layer_desc)
     // readback              -> cmd_type 2 (read_byte)
+    localparam [ADDR_BITS-1:0] BIAS_OFFSET = MAX_WBUF;
+    localparam [ADDR_BITS-1:0] FMAP_OFFSET = MAX_WBUF + MAX_CH * 4;
 
     // =========================================================================
     // State machine
@@ -163,7 +167,13 @@ module dpu_axi_dma #(
                         3'd4:              cmd_type <= 3'd6; // write_layer_desc
                         default:           cmd_type <= 3'd0;
                     endcase
-                    cmd_addr  <= cur_addr;
+                    // Apply target-specific address offset
+                    case (dma_target)
+                        3'd0:    cmd_addr <= cur_addr;                    // weight_buf
+                        3'd1:    cmd_addr <= FMAP_OFFSET + cur_addr;     // fmap_input
+                        3'd2:    cmd_addr <= BIAS_OFFSET + cur_addr;     // bias_buf
+                        default: cmd_addr <= cur_addr;                    // scale/layer_desc
+                    endcase
                     cmd_data  <= cur_byte;
                     cmd_valid <= 1'b1;
                     state     <= S_WR_WAIT;
@@ -221,9 +231,11 @@ module dpu_axi_dma #(
                 S_RD_PUSH: begin
                     m_axis_tvalid <= 1'b1;
                     m_axis_tlast  <= (byte_cnt >= dma_length);
-                    if (m_axis_tready) begin
+                    if (m_axis_tvalid && m_axis_tready) begin
                         word_byte <= 2'd0;
                         m_axis_tdata <= '0;
+                        m_axis_tvalid <= 1'b0;
+                        m_axis_tlast  <= 1'b0;
                         if (byte_cnt >= dma_length)
                             state <= S_DONE;
                         else

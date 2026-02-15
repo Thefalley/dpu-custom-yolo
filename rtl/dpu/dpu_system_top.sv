@@ -342,7 +342,9 @@ module dpu_system_top #(
     // =========================================================================
     dpu_axi_dma #(
         .ADDR_BITS  (ADDR_BITS),
-        .AXIS_DATA_W(32)
+        .AXIS_DATA_W(32),
+        .MAX_WBUF   (MAX_WBUF),
+        .MAX_CH     (MAX_CH)
     ) u_dma (
         .clk           (aclk),
         .rst_n         (aresetn),
