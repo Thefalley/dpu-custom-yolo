@@ -9,7 +9,8 @@ Test suites:
   2. 18-Layer Golden Model (Python, synthetic weights)
   3. 18-Layer RTL Simulation (Icarus Verilog, synthetic weights)
   4. AXI System Top RTL (AXI4-Lite + PIO + IRQ)
-  5. 416x416 Golden Model (full resolution, Python only)
+  5. DMA Streaming RTL (AXI-Stream write + readback)
+  6. 416x416 Golden Model (full resolution, Python only)
 
 Usage:
   python run_all_tests.py                # Run all tests
@@ -150,7 +151,29 @@ def main():
         results.append((suite, status, elapsed))
 
     # ======================================================================
-    # Suite 5: 416x416 Golden Validation
+    # Suite 5: DMA Streaming RTL
+    # ======================================================================
+    if not args.python_only:
+        suite = "DMA Streaming RTL"
+        print(f"\n{'=' * 70}")
+        print(f"  Suite 5: {suite}")
+        print(f"{'=' * 70}")
+
+        cmd = [py, str(PROJECT_ROOT / "run_dma_check.py")]
+        passed, elapsed, tail = run_test(suite, cmd, timeout=3600)
+        if "ALL TESTS PASSED" in tail:
+            status = "PASS"
+        elif passed:
+            status = "PASS"
+        else:
+            status = "FAIL"
+        print(f"  {status} ({elapsed:.1f}s)")
+        if status == "FAIL":
+            print(tail[-500:])
+        results.append((suite, status, elapsed))
+
+    # ======================================================================
+    # Suite 6: 416x416 Golden Validation
     # ======================================================================
     suite = "416x416 Golden (Python)"
     print(f"\n{'=' * 70}")
