@@ -170,11 +170,15 @@ def load_real_weights(layer_scales):
             wkey = f'layer{i}_weights'
             bkey = f'layer{i}_bias'
             skey = f'layer{i}_scale'
+            # NPZ keys: try both 'layer{i}_weights' and 'w{i}' formats
             if wkey in data:
                 weights[wkey] = data[wkey]
                 weights[bkey] = data[bkey]
-                if skey in data:
-                    layer_scales[i] = int(data[skey])
+            elif f'w{i}' in data:
+                weights[wkey] = data[f'w{i}']
+                weights[bkey] = data[f'b{i}'].astype(np.int32)
+            if skey in data:
+                layer_scales[i] = int(data[skey])
     return weights
 
 
