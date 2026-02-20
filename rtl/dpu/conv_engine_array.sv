@@ -31,16 +31,18 @@ module conv_engine_array #(
     input  logic [10:0] c_out,
     input  logic [3:0]  kernel_size,     // 1 or 3
     // Patch buffer read (activations) — 32-byte wide
-    output logic [10:0] patch_rd_addr,
+    output logic [12:0] patch_rd_addr,
     input  logic [255:0] patch_rd_data_wide,  // 32 bytes packed
     // Weight buffer read — 32-byte wide
-    output logic [17:0] weight_rd_addr,
+    output logic [21:0] weight_rd_addr,
     input  logic [255:0] weight_rd_data_wide, // 32 bytes packed
     // Bias buffer read
     output logic [8:0]  bias_rd_ch,
     input  logic signed [31:0] bias_rd_data,
     // Scale
     input  logic [15:0] scale,
+    // Activation mode
+    input  logic        skip_relu,     // 1 = LINEAR (bypass LeakyReLU)
     // Output: up to 32 results per batch (packed flat vector)
     output logic        out_valid,
     output logic [8:0]  out_ch_base,
@@ -83,6 +85,7 @@ module conv_engine_array #(
         .clk(clk), .rst_n(rst_n),
         .valid(pp_valid),
         .acc_in(arr_acc), .bias(bias_reg), .scale(scale),
+        .skip_relu(skip_relu),
         .result_flat(pp_result_flat), .done(pp_done)
     );
 
@@ -151,8 +154,8 @@ module conv_engine_array #(
             pp_valid    <= 1'b0;
             out_valid   <= 1'b0;
             done        <= 1'b0;
-            patch_rd_addr  <= 11'd0;
-            weight_rd_addr <= 18'd0;
+            patch_rd_addr  <= 13'd0;
+            weight_rd_addr <= 22'd0;
             bias_rd_ch     <= 9'd0;
             out_ch_base    <= 9'd0;
             out_count      <= 6'd0;

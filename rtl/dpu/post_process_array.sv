@@ -19,6 +19,7 @@ module post_process_array #(
     input  logic signed [31:0] acc_in [0:LANES-1],
     input  logic signed [31:0] bias   [0:LANES-1],
     input  logic [15:0]        scale,
+    input  logic               skip_relu,      // 1 = LINEAR (bypass LeakyReLU)
     output wire  [LANES*8-1:0] result_flat,    // packed: [i*8+:8] = result[i]
     output reg                 done
 );
@@ -79,10 +80,11 @@ module post_process_array #(
                     biased_r[i] <= acc_in[i] + bias[i];
             end
 
-            // Stage 2: LeakyReLU -> register
+            // Stage 2: LeakyReLU -> register (or bypass if LINEAR)
             if (v1) begin
                 for (i = 0; i < LANES; i = i + 1)
-                    relu_r[i] <= (biased_r[i][31] == 1'b0) ? biased_r[i] : (biased_r[i] >>> 3);
+                    relu_r[i] <= skip_relu ? biased_r[i] :
+                                 ((biased_r[i][31] == 1'b0) ? biased_r[i] : (biased_r[i] >>> 3));
             end
 
             // Stage 3: Requantize (combinational via assign, latch result)

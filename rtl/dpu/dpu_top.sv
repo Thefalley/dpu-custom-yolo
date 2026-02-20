@@ -1,17 +1,21 @@
-// DPU Top: 18-layer YOLOv4-tiny sequencer with PIO interface.
+// DPU Top: YOLOv4-tiny sequencer with PIO interface.
+// Supports up to 36 layers (configurable via NUM_LAYERS parameter).
 // Uses conv_engine_array (32x32 MAC array) for parallel convolution.
 // Instantiates conv_engine_array + maxpool_unit, ping-pong feature maps,
 // save buffers for skip connections, and a layer descriptor ROM.
+//
+// Layer types: Conv3x3, Conv1x1, Conv1x1_Linear, MaxPool, Route_Split,
+//              Route_Concat, Upsample_2x, Route_Save
 //
 // CMD interface (byte-at-a-time):
 //   cmd_type 0 = write_byte (addr, data)
 //   cmd_type 1 = run_layer  (runs current_layer_reg; also "continue" in run_all)
 //   cmd_type 2 = read_byte  (addr -> rsp_data)
-//   cmd_type 3 = set_layer  (cmd_data[4:0] -> current_layer_reg)
-//   cmd_type 4 = run_all    (run layers 0..17; pauses before conv layers for
-//                             weight reload, auto-advances route/maxpool)
+//   cmd_type 3 = set_layer  (cmd_data[5:0] -> current_layer_reg)
+//   cmd_type 4 = run_all    (run layers 0..NUM_LAYERS-1; pauses before conv
+//                             layers for weight reload, auto-advances others)
 //   cmd_type 5 = write_scale(cmd_data -> scale_reg bytes, addr selects byte)
-//   cmd_type 6 = write_layer_desc(addr[8:4]=layer, addr[3:0]=field, data)
+//   cmd_type 6 = write_layer_desc(addr[9:4]=layer, addr[3:0]=field, data)
 //                field: 0=type, 1=c_in_lo, 2=c_in_hi, 3=c_out_lo, 4=c_out_hi,
 //                       5=h_in_lo, 6=h_in_hi, 7=w_in_lo, 8=w_in_hi,
 //                       9=h_out_lo, 10=h_out_hi, 11=w_out_lo, 12=w_out_hi,
@@ -24,11 +28,12 @@
 `default_nettype none
 
 module dpu_top #(
-    parameter int H0        = 16,
-    parameter int W0        = 16,
-    parameter int MAX_CH    = 256,
+    parameter int H0        = 32,
+    parameter int W0        = 32,
+    parameter int MAX_CH    = 512,
     parameter int MAX_FMAP  = 65536,
-    parameter int MAX_WBUF  = 147456,
+    parameter int MAX_WBUF  = 2400000,
+    parameter int NUM_LAYERS= 18,       // how many layers run_all executes (18 or 36)
     parameter int ADDR_BITS = 24
 ) (
     input  logic        clk,
@@ -44,7 +49,7 @@ module dpu_top #(
     output logic [7:0]  rsp_data,
     output logic        busy,
     output logic        done,
-    output logic [4:0]  current_layer,
+    output logic [5:0]  current_layer,
     output logic        reload_req,   // asserted when waiting for weight load in run_all
     output logic [31:0] perf_total_cycles  // total compute cycles (busy high)
 );
@@ -57,6 +62,12 @@ module dpu_top #(
     localparam int LT_ROUTE_SPLIT  = 2;
     localparam int LT_ROUTE_CONCAT = 3;
     localparam int LT_MAXPOOL      = 4;
+    localparam int LT_CONV1X1_LIN  = 5;  // Conv1x1 LINEAR (no LeakyReLU)
+    localparam int LT_UPSAMPLE     = 6;  // Nearest neighbor 2x
+    localparam int LT_ROUTE_SAVE   = 7;  // Route from save buffer (copy)
+
+    // MAX_LAYERS: fixed array size for descriptors (always 36 entries)
+    localparam int MAX_LAYERS = 36;
 
     // =========================================================================
     // Layer descriptor ROM (18 entries)
@@ -97,20 +108,42 @@ module dpu_top #(
     localparam int W_L16 = W_L15;
     localparam int H_L17 = H_L16/2;
     localparam int W_L17 = W_L16/2;
+    // 3rd CSP block (layers 18-25)
+    localparam int H_L18 = H_L17;     localparam int W_L18 = W_L17;
+    localparam int H_L19 = H_L18;     localparam int W_L19 = W_L18;
+    localparam int H_L20 = H_L19;     localparam int W_L20 = W_L19;
+    localparam int H_L21 = H_L20;     localparam int W_L21 = W_L20;
+    localparam int H_L22 = H_L21;     localparam int W_L22 = W_L21;
+    localparam int H_L23 = H_L22;     localparam int W_L23 = W_L22;
+    localparam int H_L24 = H_L23;     localparam int W_L24 = W_L23;
+    localparam int H_L25 = (H_L24 > 1) ? H_L24/2 : 1;
+    localparam int W_L25 = (W_L24 > 1) ? W_L24/2 : 1;
+    // Detection head 1 (layers 26-29)
+    localparam int H_L26 = H_L25;     localparam int W_L26 = W_L25;
+    localparam int H_L27 = H_L26;     localparam int W_L27 = W_L26;
+    localparam int H_L28 = H_L27;     localparam int W_L28 = W_L27;
+    localparam int H_L29 = H_L28;     localparam int W_L29 = W_L28;
+    // Bridge + Detection head 2 (layers 30-35)
+    localparam int H_L30 = H_L27;     localparam int W_L30 = W_L27;  // route from L27
+    localparam int H_L31 = H_L30;     localparam int W_L31 = W_L30;
+    localparam int H_L32 = H_L31*2;   localparam int W_L32 = W_L31*2; // upsample 2x
+    localparam int H_L33 = H_L32;     localparam int W_L33 = W_L32;  // concat
+    localparam int H_L34 = H_L33;     localparam int W_L34 = W_L33;
+    localparam int H_L35 = H_L34;     localparam int W_L35 = W_L34;
 
     // Descriptor arrays (writable via cmd_type 6)
-    logic [2:0]  ld_type  [0:17];
-    logic [10:0] ld_c_in  [0:17];
-    logic [10:0] ld_c_out [0:17];
-    logic [10:0] ld_h_in  [0:17];
-    logic [10:0] ld_w_in  [0:17];
-    logic [10:0] ld_h_out [0:17];
-    logic [10:0] ld_w_out [0:17];
-    logic [1:0]  ld_stride[0:17];
-    logic [10:0] ld_macs  [0:17];
-    logic [2:0]  ld_src_a [0:17];
-    logic [2:0]  ld_src_b [0:17];
-    logic [15:0] ld_scale [0:17];
+    logic [2:0]  ld_type  [0:MAX_LAYERS-1];
+    logic [10:0] ld_c_in  [0:MAX_LAYERS-1];
+    logic [10:0] ld_c_out [0:MAX_LAYERS-1];
+    logic [10:0] ld_h_in  [0:MAX_LAYERS-1];
+    logic [10:0] ld_w_in  [0:MAX_LAYERS-1];
+    logic [10:0] ld_h_out [0:MAX_LAYERS-1];
+    logic [10:0] ld_w_out [0:MAX_LAYERS-1];
+    logic [1:0]  ld_stride[0:MAX_LAYERS-1];
+    logic [12:0] ld_macs  [0:MAX_LAYERS-1];
+    logic [2:0]  ld_src_a [0:MAX_LAYERS-1];
+    logic [2:0]  ld_src_b [0:MAX_LAYERS-1];
+    logic [15:0] ld_scale [0:MAX_LAYERS-1];
 
     initial begin
         ld_type[0]=LT_CONV3X3; ld_c_in[0]=3;   ld_c_out[0]=32;  ld_h_in[0]=H0;   ld_w_in[0]=W0;   ld_h_out[0]=H_L0;  ld_w_out[0]=W_L0;  ld_stride[0]=2; ld_macs[0]=27;   ld_src_a[0]=0; ld_src_b[0]=0; ld_scale[0]=16'd655;
@@ -131,6 +164,27 @@ module dpu_top #(
         ld_type[15]=LT_CONV1X1; ld_c_in[15]=128; ld_c_out[15]=128; ld_h_in[15]=H_L14; ld_w_in[15]=W_L14; ld_h_out[15]=H_L15; ld_w_out[15]=W_L15; ld_stride[15]=1; ld_macs[15]=128; ld_src_a[15]=0; ld_src_b[15]=0; ld_scale[15]=16'd655;
         ld_type[16]=LT_ROUTE_CONCAT; ld_c_in[16]=128; ld_c_out[16]=256; ld_h_in[16]=H_L15; ld_w_in[16]=W_L15; ld_h_out[16]=H_L16; ld_w_out[16]=W_L16; ld_stride[16]=0; ld_macs[16]=0; ld_src_a[16]=3; ld_src_b[16]=0; ld_scale[16]=16'd655;
         ld_type[17]=LT_MAXPOOL; ld_c_in[17]=256; ld_c_out[17]=256; ld_h_in[17]=H_L16; ld_w_in[17]=W_L16; ld_h_out[17]=H_L17; ld_w_out[17]=W_L17; ld_stride[17]=2; ld_macs[17]=0; ld_src_a[17]=0; ld_src_b[17]=0; ld_scale[17]=16'd655;
+        // 3rd CSP block (layers 18-25)
+        ld_type[18]=LT_CONV3X3; ld_c_in[18]=256; ld_c_out[18]=256; ld_h_in[18]=H_L17; ld_w_in[18]=W_L17; ld_h_out[18]=H_L18; ld_w_out[18]=W_L18; ld_stride[18]=1; ld_macs[18]=2304; ld_src_a[18]=0; ld_src_b[18]=0; ld_scale[18]=16'd655;
+        ld_type[19]=LT_ROUTE_SPLIT; ld_c_in[19]=256; ld_c_out[19]=128; ld_h_in[19]=H_L18; ld_w_in[19]=W_L18; ld_h_out[19]=H_L19; ld_w_out[19]=W_L19; ld_stride[19]=0; ld_macs[19]=0; ld_src_a[19]=0; ld_src_b[19]=0; ld_scale[19]=16'd655;
+        ld_type[20]=LT_CONV3X3; ld_c_in[20]=128; ld_c_out[20]=128; ld_h_in[20]=H_L19; ld_w_in[20]=W_L19; ld_h_out[20]=H_L20; ld_w_out[20]=W_L20; ld_stride[20]=1; ld_macs[20]=1152; ld_src_a[20]=0; ld_src_b[20]=0; ld_scale[20]=16'd655;
+        ld_type[21]=LT_CONV3X3; ld_c_in[21]=128; ld_c_out[21]=128; ld_h_in[21]=H_L19; ld_w_in[21]=W_L19; ld_h_out[21]=H_L21; ld_w_out[21]=W_L21; ld_stride[21]=1; ld_macs[21]=1152; ld_src_a[21]=0; ld_src_b[21]=0; ld_scale[21]=16'd655;
+        ld_type[22]=LT_ROUTE_CONCAT; ld_c_in[22]=128; ld_c_out[22]=256; ld_h_in[22]=H_L21; ld_w_in[22]=W_L21; ld_h_out[22]=H_L22; ld_w_out[22]=W_L22; ld_stride[22]=0; ld_macs[22]=0; ld_src_a[22]=0; ld_src_b[22]=5; ld_scale[22]=16'd655;
+        ld_type[23]=LT_CONV1X1; ld_c_in[23]=256; ld_c_out[23]=256; ld_h_in[23]=H_L22; ld_w_in[23]=W_L22; ld_h_out[23]=H_L23; ld_w_out[23]=W_L23; ld_stride[23]=1; ld_macs[23]=256; ld_src_a[23]=0; ld_src_b[23]=0; ld_scale[23]=16'd655;
+        ld_type[24]=LT_ROUTE_CONCAT; ld_c_in[24]=256; ld_c_out[24]=512; ld_h_in[24]=H_L23; ld_w_in[24]=W_L23; ld_h_out[24]=H_L24; ld_w_out[24]=W_L24; ld_stride[24]=0; ld_macs[24]=0; ld_src_a[24]=5; ld_src_b[24]=0; ld_scale[24]=16'd655;
+        ld_type[25]=LT_MAXPOOL; ld_c_in[25]=512; ld_c_out[25]=512; ld_h_in[25]=H_L24; ld_w_in[25]=W_L24; ld_h_out[25]=H_L25; ld_w_out[25]=W_L25; ld_stride[25]=2; ld_macs[25]=0; ld_src_a[25]=0; ld_src_b[25]=0; ld_scale[25]=16'd655;
+        // Detection head 1 (layers 26-29)
+        ld_type[26]=LT_CONV3X3; ld_c_in[26]=512; ld_c_out[26]=512; ld_h_in[26]=H_L25; ld_w_in[26]=W_L25; ld_h_out[26]=H_L26; ld_w_out[26]=W_L26; ld_stride[26]=1; ld_macs[26]=4608; ld_src_a[26]=0; ld_src_b[26]=0; ld_scale[26]=16'd655;
+        ld_type[27]=LT_CONV1X1; ld_c_in[27]=512; ld_c_out[27]=256; ld_h_in[27]=H_L26; ld_w_in[27]=W_L26; ld_h_out[27]=H_L27; ld_w_out[27]=W_L27; ld_stride[27]=1; ld_macs[27]=512; ld_src_a[27]=0; ld_src_b[27]=0; ld_scale[27]=16'd655;
+        ld_type[28]=LT_CONV3X3; ld_c_in[28]=256; ld_c_out[28]=512; ld_h_in[28]=H_L27; ld_w_in[28]=W_L27; ld_h_out[28]=H_L28; ld_w_out[28]=W_L28; ld_stride[28]=1; ld_macs[28]=2304; ld_src_a[28]=0; ld_src_b[28]=0; ld_scale[28]=16'd655;
+        ld_type[29]=LT_CONV1X1_LIN; ld_c_in[29]=512; ld_c_out[29]=255; ld_h_in[29]=H_L28; ld_w_in[29]=W_L28; ld_h_out[29]=H_L29; ld_w_out[29]=W_L29; ld_stride[29]=1; ld_macs[29]=512; ld_src_a[29]=0; ld_src_b[29]=0; ld_scale[29]=16'd655;
+        // Bridge + Detection head 2 (layers 30-35)
+        ld_type[30]=LT_ROUTE_SAVE; ld_c_in[30]=256; ld_c_out[30]=256; ld_h_in[30]=H_L27; ld_w_in[30]=W_L27; ld_h_out[30]=H_L30; ld_w_out[30]=W_L30; ld_stride[30]=0; ld_macs[30]=0; ld_src_a[30]=7; ld_src_b[30]=0; ld_scale[30]=16'd655;
+        ld_type[31]=LT_CONV1X1; ld_c_in[31]=256; ld_c_out[31]=128; ld_h_in[31]=H_L30; ld_w_in[31]=W_L30; ld_h_out[31]=H_L31; ld_w_out[31]=W_L31; ld_stride[31]=1; ld_macs[31]=256; ld_src_a[31]=0; ld_src_b[31]=0; ld_scale[31]=16'd655;
+        ld_type[32]=LT_UPSAMPLE; ld_c_in[32]=128; ld_c_out[32]=128; ld_h_in[32]=H_L31; ld_w_in[32]=W_L31; ld_h_out[32]=H_L32; ld_w_out[32]=W_L32; ld_stride[32]=0; ld_macs[32]=0; ld_src_a[32]=0; ld_src_b[32]=0; ld_scale[32]=16'd655;
+        ld_type[33]=LT_ROUTE_CONCAT; ld_c_in[33]=128; ld_c_out[33]=384; ld_h_in[33]=H_L32; ld_w_in[33]=W_L32; ld_h_out[33]=H_L33; ld_w_out[33]=W_L33; ld_stride[33]=0; ld_macs[33]=0; ld_src_a[33]=0; ld_src_b[33]=6; ld_scale[33]=16'd655;
+        ld_type[34]=LT_CONV3X3; ld_c_in[34]=384; ld_c_out[34]=256; ld_h_in[34]=H_L33; ld_w_in[34]=W_L33; ld_h_out[34]=H_L34; ld_w_out[34]=W_L34; ld_stride[34]=1; ld_macs[34]=3456; ld_src_a[34]=0; ld_src_b[34]=0; ld_scale[34]=16'd655;
+        ld_type[35]=LT_CONV1X1_LIN; ld_c_in[35]=256; ld_c_out[35]=255; ld_h_in[35]=H_L34; ld_w_in[35]=W_L34; ld_h_out[35]=H_L35; ld_w_out[35]=W_L35; ld_stride[35]=1; ld_macs[35]=256; ld_src_a[35]=0; ld_src_b[35]=0; ld_scale[35]=16'd655;
     end
 
     // =========================================================================
@@ -143,22 +197,31 @@ module dpu_top #(
     localparam int SAVE_L4_SIZE  = 32 * H_L4 * W_L4;
     localparam int SAVE_L10_SIZE = 128 * H_L10 * W_L10;
     localparam int SAVE_L12_SIZE = 64 * H_L12 * W_L12;
+    // Guard with max(1,...) so H0=16 doesn't produce 0-size arrays
+    localparam int SAVE_L18_SIZE = (256 * H_L18 * W_L18 > 0) ? 256 * H_L18 * W_L18 : 1;
+    localparam int SAVE_L20_SIZE = (128 * H_L20 * W_L20 > 0) ? 128 * H_L20 * W_L20 : 1;
+    localparam int SAVE_L23_SIZE = (256 * H_L23 * W_L23 > 0) ? 256 * H_L23 * W_L23 : 1;
+    localparam int SAVE_L27_SIZE = (256 * H_L27 * W_L27 > 0) ? 256 * H_L27 * W_L27 : 1;
 
     reg signed [7:0] fmap_save_l2  [0:SAVE_L2_SIZE-1];
     reg signed [7:0] fmap_save_l4  [0:SAVE_L4_SIZE-1];
     reg signed [7:0] fmap_save_l10 [0:SAVE_L10_SIZE-1];
     reg signed [7:0] fmap_save_l12 [0:SAVE_L12_SIZE-1];
+    reg signed [7:0] fmap_save_l18 [0:SAVE_L18_SIZE-1];
+    reg signed [7:0] fmap_save_l20 [0:SAVE_L20_SIZE-1];
+    reg signed [7:0] fmap_save_l23 [0:SAVE_L23_SIZE-1];
+    reg signed [7:0] fmap_save_l27 [0:SAVE_L27_SIZE-1];
 
     reg signed [7:0]  weight_buf [0:MAX_WBUF-1];
     reg signed [31:0] bias_buf   [0:MAX_CH-1];
     logic [15:0]      scale_reg;
 
-    reg signed [7:0] patch_buf [0:1151];
+    reg signed [7:0] patch_buf [0:4607];  // max c_in*K*K = 512*9 = 4608
 
     // Performance counters
     reg [31:0] cycle_counter;
     reg [31:0] layer_start_cycle;
-    reg [31:0] layer_cycles [0:17];
+    reg [31:0] layer_cycles [0:MAX_LAYERS-1];
     assign perf_total_cycles = cycle_counter;
 
     integer init_i;
@@ -168,7 +231,7 @@ module dpu_top #(
         scale_reg = 16'd655;
         cycle_counter = 32'd0;
         layer_start_cycle = 32'd0;
-        for (init_i = 0; init_i < 18; init_i = init_i + 1)
+        for (init_i = 0; init_i < MAX_LAYERS; init_i = init_i + 1)
             layer_cycles[init_i] = 32'd0;
     end
 
@@ -196,12 +259,15 @@ module dpu_top #(
 
     // Latched pulse signals (1-cycle pulses that may arrive while busy)
     logic        eng_done_latched;
-    logic [10:0] eng_patch_rd_addr;
+    logic [12:0] eng_patch_rd_addr;
     wire [255:0] eng_patch_rd_data_wide;
-    logic [17:0] eng_weight_rd_addr;
+    logic [21:0] eng_weight_rd_addr;
     wire [255:0] eng_weight_rd_data_wide;
     logic [8:0]  eng_bias_rd_ch;
     logic signed [31:0] eng_bias_rd_data;
+
+    // skip_relu: 1 for LINEAR layers (LT_CONV1X1_LIN)
+    logic eng_skip_relu;
 
     conv_engine_array #(.SCALE_Q(16)) u_engine (
         .clk(clk), .rst_n(rst_n), .start(eng_start),
@@ -214,6 +280,7 @@ module dpu_top #(
         .bias_rd_ch(eng_bias_rd_ch),
         .bias_rd_data(eng_bias_rd_data),
         .scale(scale_reg),
+        .skip_relu(eng_skip_relu),
         .out_valid(eng_out_valid),
         .out_ch_base(eng_out_ch_base),
         .out_count(eng_out_count),
@@ -264,6 +331,8 @@ module dpu_top #(
         S_ROUTE_COPY_A,
         S_ROUTE_COPY_B,
         S_ROUTE_DONE,
+        S_UPSAMPLE_COPY,
+        S_ROUTE_SAVE_COPY,
         S_SAVE_FMAP,
         S_LAYER_DONE,
         S_LAYER_RELOAD,
@@ -271,7 +340,7 @@ module dpu_top #(
     } state_t;
     state_t state;
 
-    logic [4:0] current_layer_reg;
+    logic [5:0] current_layer_reg;
     assign current_layer = current_layer_reg;
 
     logic run_all_mode;
@@ -280,7 +349,7 @@ module dpu_top #(
     logic [2:0]  cur_type;
     logic [10:0] cur_c_in, cur_c_out, cur_h_in, cur_w_in, cur_h_out, cur_w_out;
     logic [1:0]  cur_stride;
-    logic [10:0] cur_macs;
+    logic [12:0] cur_macs;
     logic [2:0]  cur_src_a, cur_src_b;
     logic [3:0]  cur_kernel_size;
 
@@ -314,7 +383,7 @@ module dpu_top #(
             done            <= 1'b0;
             eng_start       <= 1'b0;
             pool_valid      <= 1'b0;
-            current_layer_reg <= 5'd0;
+            current_layer_reg <= 6'd0;
             ping_pong       <= 1'b0;
             run_all_mode    <= 1'b0;
             reload_req      <= 1'b0;
@@ -328,6 +397,7 @@ module dpu_top #(
             batch_idx <= 0; batch_ch_base <= 0; batch_count <= 0;
             cur_kernel_size <= 4'd3;
             eng_done_latched <= 1'b0;
+            eng_skip_relu <= 1'b0;
         end else begin
             cmd_ready  <= 1'b0;
             rsp_valid  <= 1'b0;
@@ -383,13 +453,13 @@ module dpu_top #(
                                 state <= S_READ_ACK;
                             end
                             3'd3: begin // set_layer
-                                current_layer_reg <= cmd_data[4:0];
+                                current_layer_reg <= cmd_data[5:0];
                                 state <= S_WRITE_ACK;
                             end
                             3'd4: begin // run_all
                                 busy <= 1'b1;
                                 run_all_mode <= 1'b1;
-                                current_layer_reg <= 5'd0;
+                                current_layer_reg <= 6'd0;
                                 ping_pong <= 1'b0;
                                 cycle_counter <= 32'd0;
                                 state <= S_LAYER_INIT;
@@ -407,22 +477,22 @@ module dpu_top #(
                             3'd6: begin // write_layer_desc
                                 // addr[8:4] = layer index, addr[3:0] = field
                                 case (cmd_addr[3:0])
-                                    4'd0:  ld_type  [cmd_addr[8:4]] <= cmd_data[2:0];
-                                    4'd1:  ld_c_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd2:  ld_c_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd3:  ld_c_out [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd4:  ld_c_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd5:  ld_h_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd6:  ld_h_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd7:  ld_w_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd8:  ld_w_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd9:  ld_h_out [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd10: ld_h_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd11: ld_w_out [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd12: ld_w_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd13: ld_stride[cmd_addr[8:4]] <= cmd_data[1:0];
-                                    4'd14: ld_scale [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd15: ld_scale [cmd_addr[8:4]][15:8] <= cmd_data;
+                                    4'd0:  ld_type  [cmd_addr[9:4]] <= cmd_data[2:0];
+                                    4'd1:  ld_c_in  [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd2:  ld_c_in  [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd3:  ld_c_out [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd4:  ld_c_out [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd5:  ld_h_in  [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd6:  ld_h_in  [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd7:  ld_w_in  [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd8:  ld_w_in  [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd9:  ld_h_out [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd10: ld_h_out [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd11: ld_w_out [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd12: ld_w_out [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd13: ld_stride[cmd_addr[9:4]] <= cmd_data[1:0];
+                                    4'd14: ld_scale [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd15: ld_scale [cmd_addr[9:4]][15:8] <= cmd_data;
                                 endcase
                                 state <= S_WRITE_ACK;
                             end
@@ -457,11 +527,12 @@ module dpu_top #(
                     cur_src_b  <= ld_src_b [current_layer_reg];
                     scale_reg  <= ld_scale [current_layer_reg];
 
-                    // Determine kernel size
+                    // Determine kernel size and activation mode
                     if (ld_type[current_layer_reg] == LT_CONV3X3)
                         cur_kernel_size <= 4'd3;
                     else
                         cur_kernel_size <= 4'd1;
+                    eng_skip_relu <= (ld_type[current_layer_reg] == LT_CONV1X1_LIN);
 
                     oh <= 0; ow <= 0;
                     load_c <= 0; load_ky <= 0; load_kx <= 0; load_idx <= 0;
@@ -470,10 +541,13 @@ module dpu_top #(
                     save_idx <= 0;
 
                     case (ld_type[current_layer_reg])
-                        LT_CONV3X3, LT_CONV1X1: state <= S_CONV_LOAD_PATCH;
+                        LT_CONV3X3, LT_CONV1X1,
+                        LT_CONV1X1_LIN:         state <= S_CONV_LOAD_PATCH;
                         LT_MAXPOOL:              state <= S_POOL_LOAD;
                         LT_ROUTE_SPLIT:          state <= S_ROUTE_COPY_A;
                         LT_ROUTE_CONCAT:         state <= S_ROUTE_COPY_A;
+                        LT_UPSAMPLE:             state <= S_UPSAMPLE_COPY;
+                        LT_ROUTE_SAVE:           state <= S_ROUTE_SAVE_COPY;
                         default:                 state <= S_LAYER_DONE;
                     endcase
                 end
@@ -485,7 +559,7 @@ module dpu_top #(
                 // load_idx goes 0..macs-1 where macs = c_in * K * K
                 // =============================================================
                 S_CONV_LOAD_PATCH: begin
-                    if (cur_type == LT_CONV3X3) begin
+                    if (cur_type == LT_CONV3X3) begin  // 3x3 conv
                         tmp_ih = oh * cur_stride + load_ky - 1;  // pad=1
                         tmp_iw = ow * cur_stride + load_kx - 1;
                         if (tmp_ih < 0 || tmp_ih >= cur_h_in || tmp_iw < 0 || tmp_iw >= cur_w_in) begin
@@ -689,27 +763,33 @@ module dpu_top #(
                             copy_idx <= copy_idx + 1;
                         end
                     end else begin
-                        tmp_ch_half = cur_c_out / 2;
-                        tmp_total_a = tmp_ch_half * cur_h_out * cur_w_out;
+                        // src_a channels = cur_c_in (supports unequal concat like L33: 128+256=384)
+                        tmp_total_a = cur_c_in * cur_h_out * cur_w_out;
 
                         case (cur_src_a)
-                            3'd0: begin
+                            3'd0: begin  // current fmap (previous layer output)
                                 if (ping_pong == 1'b0)
                                     fmap_b[copy_idx] <= fmap_a[copy_idx];
                                 else
                                     fmap_a[copy_idx] <= fmap_b[copy_idx];
                             end
-                            3'd1: begin
+                            3'd1: begin  // save_l2
                                 if (ping_pong == 1'b0)
                                     fmap_b[copy_idx] <= fmap_save_l2[copy_idx];
                                 else
                                     fmap_a[copy_idx] <= fmap_save_l2[copy_idx];
                             end
-                            3'd3: begin
+                            3'd3: begin  // save_l10
                                 if (ping_pong == 1'b0)
                                     fmap_b[copy_idx] <= fmap_save_l10[copy_idx];
                                 else
                                     fmap_a[copy_idx] <= fmap_save_l10[copy_idx];
+                            end
+                            3'd5: begin  // save_l18
+                                if (ping_pong == 1'b0)
+                                    fmap_b[copy_idx] <= fmap_save_l18[copy_idx];
+                                else
+                                    fmap_a[copy_idx] <= fmap_save_l18[copy_idx];
                             end
                             default: begin
                                 if (ping_pong == 1'b0)
@@ -730,28 +810,40 @@ module dpu_top #(
                 end
 
                 S_ROUTE_COPY_B: begin
-                    tmp_ch_half = cur_c_out / 2;
-                    tmp_total_b = tmp_ch_half * cur_h_out * cur_w_out;
+                    // src_b channels = cur_c_out - cur_c_in (supports unequal concat)
+                    tmp_total_b = (cur_c_out - cur_c_in) * cur_h_out * cur_w_out;
                     tmp_dst_addr = copy_total + copy_idx;
 
                     case (cur_src_b)
-                        3'd0: begin
+                        3'd0: begin  // current fmap
                             if (ping_pong == 1'b0)
                                 fmap_b[tmp_dst_addr] <= fmap_a[copy_idx];
                             else
                                 fmap_a[tmp_dst_addr] <= fmap_b[copy_idx];
                         end
-                        3'd2: begin
+                        3'd2: begin  // save_l4
                             if (ping_pong == 1'b0)
                                 fmap_b[tmp_dst_addr] <= fmap_save_l4[copy_idx];
                             else
                                 fmap_a[tmp_dst_addr] <= fmap_save_l4[copy_idx];
                         end
-                        3'd4: begin
+                        3'd4: begin  // save_l12
                             if (ping_pong == 1'b0)
                                 fmap_b[tmp_dst_addr] <= fmap_save_l12[copy_idx];
                             else
                                 fmap_a[tmp_dst_addr] <= fmap_save_l12[copy_idx];
+                        end
+                        3'd5: begin  // save_l20
+                            if (ping_pong == 1'b0)
+                                fmap_b[tmp_dst_addr] <= fmap_save_l20[copy_idx];
+                            else
+                                fmap_a[tmp_dst_addr] <= fmap_save_l20[copy_idx];
+                        end
+                        3'd6: begin  // save_l23
+                            if (ping_pong == 1'b0)
+                                fmap_b[tmp_dst_addr] <= fmap_save_l23[copy_idx];
+                            else
+                                fmap_a[tmp_dst_addr] <= fmap_save_l23[copy_idx];
                         end
                         default: begin
                             if (ping_pong == 1'b0)
@@ -769,11 +861,81 @@ module dpu_top #(
                 end
 
                 // =============================================================
+                // UPSAMPLE 2x (nearest neighbor)
+                // Reuses pool_ch, pool_oh, pool_ow for OUTPUT coordinates
+                // =============================================================
+                S_UPSAMPLE_COPY: begin
+                    // Read from input at (pool_oh/2, pool_ow/2)
+                    tmp_src_addr = pool_ch * cur_h_in * cur_w_in
+                                 + (pool_oh >> 1) * cur_w_in
+                                 + (pool_ow >> 1);
+                    out_addr = pool_ch * cur_h_out * cur_w_out
+                             + pool_oh * cur_w_out
+                             + pool_ow;
+
+                    if (ping_pong == 1'b0)
+                        fmap_b[out_addr] <= fmap_a[tmp_src_addr];
+                    else
+                        fmap_a[out_addr] <= fmap_b[tmp_src_addr];
+
+                    if (pool_ow + 1 < cur_w_out) begin
+                        pool_ow <= pool_ow + 1;
+                    end else begin
+                        pool_ow <= 0;
+                        if (pool_oh + 1 < cur_h_out) begin
+                            pool_oh <= pool_oh + 1;
+                        end else begin
+                            pool_oh <= 0;
+                            if (pool_ch + 1 < cur_c_out) begin
+                                pool_ch <= pool_ch + 1;
+                            end else begin
+                                state <= S_SAVE_FMAP;
+                            end
+                        end
+                    end
+                end
+
+                // =============================================================
+                // ROUTE_SAVE: copy from a save buffer to output fmap
+                // cur_src_a encodes which save buffer: 7=save_l27
+                // =============================================================
+                S_ROUTE_SAVE_COPY: begin
+                    tmp_total_a = cur_c_out * cur_h_out * cur_w_out;
+
+                    case (cur_src_a)
+                        3'd5: begin  // save_l18
+                            if (ping_pong == 1'b0)
+                                fmap_b[copy_idx] <= fmap_save_l18[copy_idx];
+                            else
+                                fmap_a[copy_idx] <= fmap_save_l18[copy_idx];
+                        end
+                        3'd7: begin  // save_l27
+                            if (ping_pong == 1'b0)
+                                fmap_b[copy_idx] <= fmap_save_l27[copy_idx];
+                            else
+                                fmap_a[copy_idx] <= fmap_save_l27[copy_idx];
+                        end
+                        default: begin
+                            if (ping_pong == 1'b0)
+                                fmap_b[copy_idx] <= fmap_a[copy_idx];
+                            else
+                                fmap_a[copy_idx] <= fmap_b[copy_idx];
+                        end
+                    endcase
+
+                    if (copy_idx + 1 >= tmp_total_a) begin
+                        state <= S_SAVE_FMAP;
+                    end else begin
+                        copy_idx <= copy_idx + 1;
+                    end
+                end
+
+                // =============================================================
                 // SAVE
                 // =============================================================
                 S_SAVE_FMAP: begin
                     case (current_layer_reg)
-                        5'd2: begin
+                        6'd2: begin
                             if (save_idx < SAVE_L2_SIZE) begin
                                 if (ping_pong == 1'b0)
                                     fmap_save_l2[save_idx] <= fmap_b[save_idx];
@@ -784,7 +946,7 @@ module dpu_top #(
                                 state <= S_LAYER_DONE;
                             end
                         end
-                        5'd4: begin
+                        6'd4: begin
                             if (save_idx < SAVE_L4_SIZE) begin
                                 if (ping_pong == 1'b0)
                                     fmap_save_l4[save_idx] <= fmap_b[save_idx];
@@ -795,7 +957,7 @@ module dpu_top #(
                                 state <= S_LAYER_DONE;
                             end
                         end
-                        5'd10: begin
+                        6'd10: begin
                             if (save_idx < SAVE_L10_SIZE) begin
                                 if (ping_pong == 1'b0)
                                     fmap_save_l10[save_idx] <= fmap_b[save_idx];
@@ -806,12 +968,56 @@ module dpu_top #(
                                 state <= S_LAYER_DONE;
                             end
                         end
-                        5'd12: begin
+                        6'd12: begin
                             if (save_idx < SAVE_L12_SIZE) begin
                                 if (ping_pong == 1'b0)
                                     fmap_save_l12[save_idx] <= fmap_b[save_idx];
                                 else
                                     fmap_save_l12[save_idx] <= fmap_a[save_idx];
+                                save_idx <= save_idx + 1;
+                            end else begin
+                                state <= S_LAYER_DONE;
+                            end
+                        end
+                        6'd18: begin
+                            if (save_idx < SAVE_L18_SIZE) begin
+                                if (ping_pong == 1'b0)
+                                    fmap_save_l18[save_idx] <= fmap_b[save_idx];
+                                else
+                                    fmap_save_l18[save_idx] <= fmap_a[save_idx];
+                                save_idx <= save_idx + 1;
+                            end else begin
+                                state <= S_LAYER_DONE;
+                            end
+                        end
+                        6'd20: begin
+                            if (save_idx < SAVE_L20_SIZE) begin
+                                if (ping_pong == 1'b0)
+                                    fmap_save_l20[save_idx] <= fmap_b[save_idx];
+                                else
+                                    fmap_save_l20[save_idx] <= fmap_a[save_idx];
+                                save_idx <= save_idx + 1;
+                            end else begin
+                                state <= S_LAYER_DONE;
+                            end
+                        end
+                        6'd23: begin
+                            if (save_idx < SAVE_L23_SIZE) begin
+                                if (ping_pong == 1'b0)
+                                    fmap_save_l23[save_idx] <= fmap_b[save_idx];
+                                else
+                                    fmap_save_l23[save_idx] <= fmap_a[save_idx];
+                                save_idx <= save_idx + 1;
+                            end else begin
+                                state <= S_LAYER_DONE;
+                            end
+                        end
+                        6'd27: begin
+                            if (save_idx < SAVE_L27_SIZE) begin
+                                if (ping_pong == 1'b0)
+                                    fmap_save_l27[save_idx] <= fmap_b[save_idx];
+                                else
+                                    fmap_save_l27[save_idx] <= fmap_a[save_idx];
                                 save_idx <= save_idx + 1;
                             end else begin
                                 state <= S_LAYER_DONE;
@@ -827,13 +1033,14 @@ module dpu_top #(
                     layer_cycles[current_layer_reg] <= cycle_counter - layer_start_cycle;
 
                     if (run_all_mode) begin
-                        if (current_layer_reg == 5'd17) begin
+                        if (current_layer_reg == NUM_LAYERS - 1) begin
                             state <= S_ALL_DONE;
                         end else begin
-                            current_layer_reg <= current_layer_reg + 5'd1;
-                            // Conv layers need weight reload; route/maxpool auto-advance
-                            if (ld_type[current_layer_reg + 5'd1] == LT_CONV3X3 ||
-                                ld_type[current_layer_reg + 5'd1] == LT_CONV1X1) begin
+                            current_layer_reg <= current_layer_reg + 6'd1;
+                            // Conv layers need weight reload; route/maxpool/upsample auto-advance
+                            if (ld_type[current_layer_reg + 6'd1] == LT_CONV3X3 ||
+                                ld_type[current_layer_reg + 6'd1] == LT_CONV1X1 ||
+                                ld_type[current_layer_reg + 6'd1] == LT_CONV1X1_LIN) begin
                                 state <= S_LAYER_RELOAD;
                             end else begin
                                 state <= S_LAYER_INIT;
@@ -898,22 +1105,22 @@ module dpu_top #(
                             end
                             3'd6: begin // write_layer_desc
                                 case (cmd_addr[3:0])
-                                    4'd0:  ld_type  [cmd_addr[8:4]] <= cmd_data[2:0];
-                                    4'd1:  ld_c_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd2:  ld_c_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd3:  ld_c_out [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd4:  ld_c_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd5:  ld_h_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd6:  ld_h_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd7:  ld_w_in  [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd8:  ld_w_in  [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd9:  ld_h_out [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd10: ld_h_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd11: ld_w_out [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd12: ld_w_out [cmd_addr[8:4]][10:8] <= cmd_data[2:0];
-                                    4'd13: ld_stride[cmd_addr[8:4]] <= cmd_data[1:0];
-                                    4'd14: ld_scale [cmd_addr[8:4]][7:0]  <= cmd_data;
-                                    4'd15: ld_scale [cmd_addr[8:4]][15:8] <= cmd_data;
+                                    4'd0:  ld_type  [cmd_addr[9:4]] <= cmd_data[2:0];
+                                    4'd1:  ld_c_in  [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd2:  ld_c_in  [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd3:  ld_c_out [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd4:  ld_c_out [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd5:  ld_h_in  [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd6:  ld_h_in  [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd7:  ld_w_in  [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd8:  ld_w_in  [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd9:  ld_h_out [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd10: ld_h_out [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd11: ld_w_out [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd12: ld_w_out [cmd_addr[9:4]][10:8] <= cmd_data[2:0];
+                                    4'd13: ld_stride[cmd_addr[9:4]] <= cmd_data[1:0];
+                                    4'd14: ld_scale [cmd_addr[9:4]][7:0]  <= cmd_data;
+                                    4'd15: ld_scale [cmd_addr[9:4]][15:8] <= cmd_data;
                                 endcase
                                 state <= S_LAYER_RELOAD;
                                 cmd_ready <= 1'b0;
