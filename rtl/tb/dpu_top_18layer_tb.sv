@@ -35,7 +35,9 @@ module dpu_top_18layer_tb;
         .rsp_valid(rsp_valid), .rsp_data(rsp_data),
         .busy(busy), .done(dut_done), .current_layer(current_layer),
         .reload_req(reload_req),
-        .perf_total_cycles(perf_total_cycles)
+        .perf_total_cycles(perf_total_cycles),
+        .layer_done_pulse(),
+        .done_layer_idx()
     );
 
     initial begin clk = 0; forever #5 clk = ~clk; end

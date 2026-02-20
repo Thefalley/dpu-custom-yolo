@@ -51,7 +51,9 @@ module dpu_top #(
     output logic        done,
     output logic [5:0]  current_layer,
     output logic        reload_req,   // asserted when waiting for weight load in run_all
-    output logic [31:0] perf_total_cycles  // total compute cycles (busy high)
+    output logic [31:0] perf_total_cycles,  // total compute cycles (busy high)
+    output logic        layer_done_pulse,   // pulses 1 cycle when a layer completes
+    output logic [5:0]  done_layer_idx      // which layer just completed (valid when layer_done_pulse)
 );
 
     // =========================================================================
@@ -387,6 +389,8 @@ module dpu_top #(
             ping_pong       <= 1'b0;
             run_all_mode    <= 1'b0;
             reload_req      <= 1'b0;
+            layer_done_pulse <= 1'b0;
+            done_layer_idx  <= 6'd0;
             cycle_counter   <= 32'd0;
             layer_start_cycle <= 32'd0;
             oh <= 0; ow <= 0;
@@ -405,6 +409,7 @@ module dpu_top #(
             eng_start  <= 1'b0;
             pool_valid <= 1'b0;
             reload_req <= 1'b0;
+            layer_done_pulse <= 1'b0;
 
             // Performance counter: increment when busy
             if (busy)
@@ -1030,6 +1035,8 @@ module dpu_top #(
                 // =============================================================
                 S_LAYER_DONE: begin
                     ping_pong <= ~ping_pong;
+                    layer_done_pulse <= 1'b1;  // pulse for per-layer verification
+                    done_layer_idx   <= current_layer_reg;  // capture before increment
                     layer_cycles[current_layer_reg] <= cycle_counter - layer_start_cycle;
 
                     if (run_all_mode) begin
