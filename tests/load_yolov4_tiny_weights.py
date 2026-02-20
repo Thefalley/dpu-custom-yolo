@@ -6,7 +6,11 @@ quantize to INT8/INT32, and export for the DPU golden model.
 Downloads yolov4-tiny.weights if not present, parses the darknet binary
 format, folds BN parameters into conv weights, and quantizes.
 
-Output: image_sim_out/dpu_top_real/ directory with hex files.
+Covers ALL 21 conv layers in YOLOv4-tiny:
+  - 10 backbone conv layers (darknet 0-15)
+  - 11 detection head conv layers (darknet 18-29, 32, 35-36)
+
+Output: image_sim_out/dpu_top_real/ directory with hex files + quantized_weights.npz
 
 Usage: python tests/load_yolov4_tiny_weights.py
 """
@@ -23,28 +27,48 @@ sys.path.insert(0, str(PROJECT_ROOT))
 WEIGHTS_URL = "https://github.com/AlexeyAB/darknet/releases/download/yolov4/yolov4-tiny.weights"
 WEIGHTS_FILE = PROJECT_ROOT / "yolov4-tiny.weights"
 
-# DPU conv layer definitions (index in our 18-layer sequence)
+# DPU conv layer definitions — ALL 21 conv layers in YOLOv4-tiny.
 # Each: (dpu_layer, c_in, c_out, kernel, stride, has_bn)
-# These are the conv layers in YOLOv4-tiny backbone (first 18 darknet layers)
+# Listed in darknet config order (weight file reads sequentially).
+# dpu_layer = internal layer index (0-35 for 36-layer DPU).
 CONV_LAYERS = [
-    (0,   3,  32, 3, 2, True),
-    (1,  32,  64, 3, 2, True),
-    (2,  64,  64, 3, 1, True),
-    # layer 3 = route split (no weights)
-    (4,  32,  32, 3, 1, True),
-    (5,  32,  32, 3, 1, True),
-    # layer 6 = route concat (no weights)
-    (7,  64,  64, 1, 1, True),
-    # layer 8 = route concat (no weights)
-    # layer 9 = maxpool (no weights)
-    (10, 128, 128, 3, 1, True),
-    # layer 11 = route split (no weights)
-    (12,  64,  64, 3, 1, True),
-    (13,  64,  64, 3, 1, True),
-    # layer 14 = route concat (no weights)
-    (15, 128, 128, 1, 1, True),
-    # layer 16 = route concat (no weights)
-    # layer 17 = maxpool (no weights)
+    # --- 1st CSP block (backbone) ---
+    (0,   3,  32, 3, 2, True),    # darknet 0
+    (1,  32,  64, 3, 2, True),    # darknet 1
+    (2,  64,  64, 3, 1, True),    # darknet 2
+    # darknet 3 = route split (no weights)
+    (4,  32,  32, 3, 1, True),    # darknet 4
+    (5,  32,  32, 3, 1, True),    # darknet 5
+    # darknet 6 = route concat (no weights)
+    (7,  64,  64, 1, 1, True),    # darknet 7
+    # darknet 8 = route concat, 9 = maxpool (no weights)
+    # --- 2nd CSP block ---
+    (10, 128, 128, 3, 1, True),   # darknet 10
+    # darknet 11 = route split (no weights)
+    (12,  64,  64, 3, 1, True),   # darknet 12
+    (13,  64,  64, 3, 1, True),   # darknet 13
+    # darknet 14 = route concat (no weights)
+    (15, 128, 128, 1, 1, True),   # darknet 15
+    # darknet 16 = route concat, 17 = maxpool (no weights)
+    # --- 3rd CSP block ---
+    (18, 256, 256, 3, 1, True),   # darknet 18
+    # darknet 19 = route split (no weights)
+    (20, 128, 128, 3, 1, True),   # darknet 20
+    (21, 128, 128, 3, 1, True),   # darknet 21
+    # darknet 22 = route concat (no weights)
+    (23, 256, 256, 1, 1, True),   # darknet 23
+    # darknet 24 = route concat, 25 = maxpool (no weights)
+    # --- Detection head 1 ---
+    (26, 512, 512, 3, 1, True),   # darknet 26
+    (27, 512, 256, 1, 1, True),   # darknet 27
+    (28, 256, 512, 3, 1, True),   # darknet 28
+    (29, 512, 255, 1, 1, False),  # darknet 29 (detection output, NO batch norm)
+    # darknet 30 = YOLO decode (skipped), 31 = route (no weights)
+    # --- Bridge + Detection head 2 ---
+    (31, 256, 128, 1, 1, True),   # darknet 32 → internal 31
+    # darknet 33 = upsample, 34 = route concat (no weights)
+    (34, 384, 256, 3, 1, True),   # darknet 35 → internal 34
+    (35, 256, 255, 1, 1, False),  # darknet 36 → internal 35 (detection output, NO batch norm)
 ]
 
 
@@ -111,7 +135,7 @@ def parse_darknet_weights(filepath):
             })
 
         remaining = len(f.read())
-        print(f"[PARSE] Loaded {len(layers)} conv layers, {remaining} bytes remaining (detection head)")
+        print(f"[PARSE] Loaded {len(layers)} conv layers, {remaining} bytes remaining")
 
     return layers
 
@@ -279,7 +303,14 @@ def main():
     )
     print(f"  quantized_weights.npz saved")
 
-    print("\n[DONE] Real YOLOv4-tiny weights converted to INT8")
+    # Also export per-layer output scales for requantization
+    np.savez(
+        out_dir / "output_scales.npz",
+        **{f"scale{idx}": np.float64(s) for idx, s in output_scales.items()},
+    )
+    print(f"  output_scales.npz saved")
+
+    print(f"\n[DONE] Real YOLOv4-tiny weights converted to INT8 (all {len(quantized)} conv layers)")
     print(f"  Output directory: {out_dir}")
     return 0
 
