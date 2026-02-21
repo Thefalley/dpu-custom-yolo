@@ -26,12 +26,13 @@
 // =============================================================================
 
 module dpu_system_top #(
-    parameter int H0        = 16,
-    parameter int W0        = 16,
-    parameter int MAX_CH    = 256,
-    parameter int MAX_FMAP  = 65536,
-    parameter int MAX_WBUF  = 147456,
-    parameter int ADDR_BITS = 24
+    parameter int H0         = 32,
+    parameter int W0         = 32,
+    parameter int MAX_CH     = 512,
+    parameter int MAX_FMAP   = 65536,
+    parameter int MAX_WBUF   = 2400000,
+    parameter int NUM_LAYERS = 36,
+    parameter int ADDR_BITS  = 24
 ) (
     // ---- Clock & Reset ----
     input  logic        aclk,
@@ -99,7 +100,7 @@ module dpu_system_top #(
     logic        dpu_rsp_valid;
     logic [7:0]  dpu_rsp_data;
     logic        dpu_busy, dpu_done;
-    logic [4:0]  dpu_current_layer;
+    logic [5:0]  dpu_current_layer;
     logic        dpu_reload_req;
     logic [31:0] dpu_perf;
 
@@ -116,12 +117,13 @@ module dpu_system_top #(
     // DPU Core
     // =========================================================================
     dpu_top #(
-        .H0       (H0),
-        .W0       (W0),
-        .MAX_CH   (MAX_CH),
-        .MAX_FMAP (MAX_FMAP),
-        .MAX_WBUF (MAX_WBUF),
-        .ADDR_BITS(ADDR_BITS)
+        .H0        (H0),
+        .W0        (W0),
+        .MAX_CH    (MAX_CH),
+        .MAX_FMAP  (MAX_FMAP),
+        .MAX_WBUF  (MAX_WBUF),
+        .NUM_LAYERS(NUM_LAYERS),
+        .ADDR_BITS (ADDR_BITS)
     ) u_dpu (
         .clk             (aclk),
         .rst_n           (aresetn),
@@ -136,7 +138,9 @@ module dpu_system_top #(
         .done            (dpu_done),
         .current_layer   (dpu_current_layer),
         .reload_req      (dpu_reload_req),
-        .perf_total_cycles(dpu_perf)
+        .perf_total_cycles(dpu_perf),
+        .layer_done_pulse(),
+        .done_layer_idx  ()
     );
 
     // =========================================================================
@@ -303,7 +307,7 @@ module dpu_system_top #(
                 6'h01: axi_rdata_r <= {{(32-ADDR_BITS){1'b0}}, reg_addr};
                 6'h03: axi_rdata_r <= {24'd0, rsp_latch};
                 6'h04: axi_rdata_r <= {14'd0, dpu_cmd_ready, dpu_reload_req,
-                                        3'd0, dpu_current_layer, 6'd0, dpu_done, dpu_busy};
+                                        2'd0, dpu_current_layer, 6'd0, dpu_done, dpu_busy};
                 6'h05: axi_rdata_r <= dpu_perf;
                 6'h06: axi_rdata_r <= {30'd0, reg_irq_en};
                 6'h07: axi_rdata_r <= {30'd0, reg_irq_stat};

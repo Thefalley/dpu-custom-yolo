@@ -90,7 +90,8 @@ module dpu_system_top_tb;
     // ---- DUT ----
     dpu_system_top #(
         .H0(H0), .W0(W0), .MAX_CH(MAX_CH),
-        .MAX_FMAP(MAX_FMAP), .MAX_WBUF(MAX_WBUF), .ADDR_BITS(ADDR_BITS)
+        .MAX_FMAP(MAX_FMAP), .MAX_WBUF(MAX_WBUF), .ADDR_BITS(ADDR_BITS),
+        .NUM_LAYERS(18)
     ) u_dut (
         .aclk(aclk), .aresetn(aresetn),
         .s_axi_awaddr(s_axi_awaddr), .s_axi_awprot(s_axi_awprot),
