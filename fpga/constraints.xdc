@@ -1,6 +1,7 @@
 # ==============================================================================
 # DPU Custom YOLOv4-tiny — Timing & Pin Constraints
 # Target: Zynq-7020 (ZedBoard xc7z020clg484-1)
+# Design: Full 36-layer YOLOv4-tiny (H0=32, W0=32, MAX_CH=512)
 #
 # For PS-PL integration, clock comes from PS FCLK_CLK0.
 # No external pin constraints needed when using Zynq block design.
@@ -39,19 +40,19 @@ set_output_delay -clock aclk -min 0.5 [get_ports irq]
 set_false_path -from [get_ports aresetn]
 
 # ------------------------------------------------------------------------------
+# Memory inference — BRAM directives
+# ------------------------------------------------------------------------------
+# Weight buffer (~2.4 MB) — may exceed on-chip BRAM capacity on Zynq-7020
+# (140 BRAM36K = 630 KB). Consider external memory or weight streaming.
+# For now, let Vivado decide optimal mapping.
+#
+# Feature map buffers (64 KB x 2 = 128 KB) -> BRAM
+# set_property RAM_STYLE block [get_cells -hierarchical -filter {NAME =~ *fmap_a*}]
+# set_property RAM_STYLE block [get_cells -hierarchical -filter {NAME =~ *fmap_b*}]
+
+# ------------------------------------------------------------------------------
 # Area / Pblock constraints (optional, uncomment if needed)
 # ------------------------------------------------------------------------------
 # create_pblock pblock_dpu
 # resize_pblock pblock_dpu -add CLOCKREGION_X0Y0:CLOCKREGION_X1Y1
 # add_cells_to_pblock pblock_dpu [get_cells u_dpu]
-
-# ------------------------------------------------------------------------------
-# Memory inference hints
-# ------------------------------------------------------------------------------
-# Weight buffer (144KB) -> BRAM
-# Feature map buffers (64KB x 2) -> BRAM
-# These should be automatically inferred as BRAM by Vivado.
-# If not, use:
-# set_property RAM_STYLE block [get_cells u_dpu/u_dpu/weight_buf_reg]
-# set_property RAM_STYLE block [get_cells u_dpu/u_dpu/fmap_a_reg]
-# set_property RAM_STYLE block [get_cells u_dpu/u_dpu/fmap_b_reg]

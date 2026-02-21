@@ -1,17 +1,26 @@
 # ==============================================================================
 # DPU Zynq Block Design — Creates PS-PL interconnect
-# Run AFTER synth.tcl creates the project, or standalone:
+# Target: Zynq-7020 (ZedBoard), Vivado 2022.2+
+#
+# Run AFTER synth.tcl creates the project:
 #   vivado -mode batch -source create_block_design.tcl
 #
 # Creates a block design with:
 #   - Zynq PS (FCLK_CLK0=100MHz, GP0, HP0)
-#   - DPU system top (AXI4-Lite slave on GP0)
+#   - DPU system top (AXI4-Lite slave on GP0, 36-layer)
 #   - AXI DMA (MM2S->DPU S_AXIS, S2MM<-DPU M_AXIS, on HP0)
 #   - Interrupt concatenation -> PS IRQ_F2P
 # ==============================================================================
 
+set script_dir [file dirname [file normalize [info script]]]
+
 # Open existing project
-open_project ./vivado_project/dpu_yolov4_tiny.xpr
+open_project $script_dir/vivado_project/dpu_yolov4_tiny.xpr
+
+# Delete old block design if it exists
+if {[llength [get_bd_designs -quiet dpu_bd]] > 0} {
+    delete_bd_design dpu_bd
+}
 
 # Create block design
 create_bd_design "dpu_bd"
@@ -31,23 +40,28 @@ apply_bd_automation -rule xilinx.com:bd_rule:processing_system7 \
 # ==== DPU System Top (RTL module) ====
 create_bd_cell -type module -reference dpu_system_top dpu_sys
 
-# ==== AXI Interconnect for GP0 -> DPU AXI-Lite ====
+# ==== AXI Interconnect for GP0 -> DPU AXI-Lite + DMA control ====
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axi_gp0_ic
-set_property CONFIG.NUM_MI {1} [get_bd_cells axi_gp0_ic]
+set_property CONFIG.NUM_MI {2} [get_bd_cells axi_gp0_ic]
 
-# Connect GP0 -> interconnect -> DPU
+# Connect GP0 -> interconnect
 connect_bd_intf_net [get_bd_intf_pins ps7/M_AXI_GP0] \
                     [get_bd_intf_pins axi_gp0_ic/S00_AXI]
+# M00 -> DPU AXI-Lite
 connect_bd_intf_net [get_bd_intf_pins axi_gp0_ic/M00_AXI] \
                     [get_bd_intf_pins dpu_sys/s_axi]
 
-# ==== AXI DMA ====
+# ==== AXI DMA (Simple DMA, no scatter-gather) ====
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma
 set_property -dict [list \
     CONFIG.c_include_sg {0} \
     CONFIG.c_sg_include_stscntrl_strm {0} \
     CONFIG.c_mm2s_burst_size {16} \
     CONFIG.c_s2mm_burst_size {16} \
+    CONFIG.c_m_axi_mm2s_data_width {32} \
+    CONFIG.c_m_axi_s2mm_data_width {32} \
+    CONFIG.c_m_axis_mm2s_tdata_width {32} \
+    CONFIG.c_s_axis_s2mm_tdata_width {32} \
 ] [get_bd_cells axi_dma]
 
 # DMA MM2S -> DPU S_AXIS (data in)
@@ -57,12 +71,11 @@ connect_bd_intf_net [get_bd_intf_pins axi_dma/M_AXIS_MM2S] \
 connect_bd_intf_net [get_bd_intf_pins dpu_sys/m_axis] \
                     [get_bd_intf_pins axi_dma/S_AXIS_S2MM]
 
-# DMA control port on GP0 interconnect
-set_property CONFIG.NUM_MI {2} [get_bd_cells axi_gp0_ic]
+# DMA control port on GP0 interconnect (M01)
 connect_bd_intf_net [get_bd_intf_pins axi_gp0_ic/M01_AXI] \
                     [get_bd_intf_pins axi_dma/S_AXI_LITE]
 
-# DMA memory port on HP0
+# ==== HP0 Interconnect for DMA memory access ====
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 axi_hp0_ic
 set_property CONFIG.NUM_SI {2} [get_bd_cells axi_hp0_ic]
 connect_bd_intf_net [get_bd_intf_pins axi_dma/M_AXI_MM2S] \
@@ -105,6 +118,7 @@ connect_bd_net [get_bd_pins irq_concat/dout]         [get_bd_pins ps7/IRQ_F2P]
 
 # ==== Address mapping ====
 assign_bd_address
+# DPU control registers
 set_property range 256 [get_bd_addr_segs {ps7/Data/SEG_dpu_sys_reg0}]
 set_property offset 0x43C00000 [get_bd_addr_segs {ps7/Data/SEG_dpu_sys_reg0}]
 
@@ -115,5 +129,6 @@ generate_target all [get_files dpu_bd.bd]
 make_wrapper -files [get_files dpu_bd.bd] -top
 
 puts "Block design created: dpu_bd"
-puts "DPU base address: 0x43C00000"
+puts "DPU AXI-Lite base:  0x43C0_0000"
+puts "AXI DMA base:       (auto-assigned)"
 close_project

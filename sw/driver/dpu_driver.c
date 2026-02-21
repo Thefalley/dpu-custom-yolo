@@ -1,32 +1,62 @@
 /**
  * DPU Driver — Implementation
+ * Full 36-layer YOLOv4-tiny (H0=32, W0=32)
  */
 
 #include "dpu_driver.h"
 #include <string.h>
 
 /* --------------------------------------------------------------------------
- * YOLOv4-tiny layer table (matches golden model, H0=W0 parameterized)
+ * YOLOv4-tiny 36-layer table (matches golden model, H0=32 W0=32)
+ *
+ * Format: { type, c_in, c_out, h_in, w_in, h_out, w_out, stride, scale }
+ *
+ * Layer mapping (internal -> darknet):
+ *   0-29:  same as darknet 0-29
+ *   30:    darknet 31 (route_save)
+ *   31:    darknet 32 (conv1x1)
+ *   32:    darknet 33 (upsample)
+ *   33:    darknet 34 (route_concat)
+ *   34:    darknet 35 (conv3x3)
+ *   35:    darknet 36 (conv1x1_linear, detection head 2)
  * -------------------------------------------------------------------------- */
-static const dpu_layer_desc_t yolov4_tiny_layers[DPU_NUM_LAYERS] = {
-    /*  0 */ { 0,   3,  32, 16, 16,  8,  8, 2, 655 },  /* Conv3x3 s2 */
-    /*  1 */ { 0,  32,  64,  8,  8,  4,  4, 2, 655 },  /* Conv3x3 s2 */
-    /*  2 */ { 0,  64,  64,  4,  4,  4,  4, 1, 655 },  /* Conv3x3    */
-    /*  3 */ { 2,  64,  32,  4,  4,  4,  4, 1, 655 },  /* RouteSplit  */
-    /*  4 */ { 0,  32,  32,  4,  4,  4,  4, 1, 655 },  /* Conv3x3    */
-    /*  5 */ { 0,  32,  32,  4,  4,  4,  4, 1, 655 },  /* Conv3x3    */
-    /*  6 */ { 3,  32,  64,  4,  4,  4,  4, 1, 655 },  /* RouteConcat */
-    /*  7 */ { 1,  64,  64,  4,  4,  4,  4, 1, 655 },  /* Conv1x1    */
-    /*  8 */ { 3,  64, 128,  4,  4,  4,  4, 1, 655 },  /* RouteConcat */
-    /*  9 */ { 4, 128, 128,  4,  4,  2,  2, 2, 655 },  /* MaxPool s2 */
-    /* 10 */ { 0, 128, 128,  2,  2,  2,  2, 1, 655 },  /* Conv3x3    */
-    /* 11 */ { 2, 128,  64,  2,  2,  2,  2, 1, 655 },  /* RouteSplit  */
-    /* 12 */ { 0,  64,  64,  2,  2,  2,  2, 1, 655 },  /* Conv3x3    */
-    /* 13 */ { 0,  64,  64,  2,  2,  2,  2, 1, 655 },  /* Conv3x3    */
-    /* 14 */ { 3,  64, 128,  2,  2,  2,  2, 1, 655 },  /* RouteConcat */
-    /* 15 */ { 1, 128, 128,  2,  2,  2,  2, 1, 655 },  /* Conv1x1    */
-    /* 16 */ { 3, 128, 256,  2,  2,  2,  2, 1, 655 },  /* RouteConcat */
-    /* 17 */ { 4, 256, 256,  2,  2,  1,  1, 2, 655 },  /* MaxPool s2 */
+static const dpu_layer_desc_t yolov4_tiny_36layer[DPU_NUM_LAYERS] = {
+    /*  0 */ { DPU_LAYER_CONV3X3,        3,  32, 32, 32, 16, 16, 2, 655 },
+    /*  1 */ { DPU_LAYER_CONV3X3,       32,  64, 16, 16,  8,  8, 2, 655 },
+    /*  2 */ { DPU_LAYER_CONV3X3,       64,  64,  8,  8,  8,  8, 1, 655 },
+    /*  3 */ { DPU_LAYER_ROUTE_SPLIT,   64,  32,  8,  8,  8,  8, 1, 655 },
+    /*  4 */ { DPU_LAYER_CONV3X3,       32,  32,  8,  8,  8,  8, 1, 655 },
+    /*  5 */ { DPU_LAYER_CONV3X3,       32,  32,  8,  8,  8,  8, 1, 655 },
+    /*  6 */ { DPU_LAYER_ROUTE_CONCAT,  32,  64,  8,  8,  8,  8, 1, 655 },
+    /*  7 */ { DPU_LAYER_CONV1X1,       64,  64,  8,  8,  8,  8, 1, 655 },
+    /*  8 */ { DPU_LAYER_ROUTE_CONCAT,  64, 128,  8,  8,  8,  8, 1, 655 },
+    /*  9 */ { DPU_LAYER_MAXPOOL,      128, 128,  8,  8,  4,  4, 2, 655 },
+    /* 10 */ { DPU_LAYER_CONV3X3,      128, 128,  4,  4,  4,  4, 1, 655 },
+    /* 11 */ { DPU_LAYER_ROUTE_SPLIT,  128,  64,  4,  4,  4,  4, 1, 655 },
+    /* 12 */ { DPU_LAYER_CONV3X3,       64,  64,  4,  4,  4,  4, 1, 655 },
+    /* 13 */ { DPU_LAYER_CONV3X3,       64,  64,  4,  4,  4,  4, 1, 655 },
+    /* 14 */ { DPU_LAYER_ROUTE_CONCAT,  64, 128,  4,  4,  4,  4, 1, 655 },
+    /* 15 */ { DPU_LAYER_CONV1X1,      128, 128,  4,  4,  4,  4, 1, 655 },
+    /* 16 */ { DPU_LAYER_ROUTE_CONCAT, 128, 256,  4,  4,  4,  4, 1, 655 },
+    /* 17 */ { DPU_LAYER_MAXPOOL,      256, 256,  4,  4,  2,  2, 2, 655 },
+    /* 18 */ { DPU_LAYER_CONV3X3,      256, 256,  2,  2,  2,  2, 1, 655 },
+    /* 19 */ { DPU_LAYER_ROUTE_SPLIT,  256, 128,  2,  2,  2,  2, 1, 655 },
+    /* 20 */ { DPU_LAYER_CONV3X3,      128, 128,  2,  2,  2,  2, 1, 655 },
+    /* 21 */ { DPU_LAYER_CONV3X3,      128, 128,  2,  2,  2,  2, 1, 655 },
+    /* 22 */ { DPU_LAYER_ROUTE_CONCAT, 128, 256,  2,  2,  2,  2, 1, 655 },
+    /* 23 */ { DPU_LAYER_CONV1X1,      256, 256,  2,  2,  2,  2, 1, 655 },
+    /* 24 */ { DPU_LAYER_ROUTE_CONCAT, 256, 512,  2,  2,  2,  2, 1, 655 },
+    /* 25 */ { DPU_LAYER_MAXPOOL,      512, 512,  2,  2,  1,  1, 2, 655 },
+    /* 26 */ { DPU_LAYER_CONV3X3,      512, 512,  1,  1,  1,  1, 1, 655 },
+    /* 27 */ { DPU_LAYER_CONV1X1,      512, 256,  1,  1,  1,  1, 1, 655 },
+    /* 28 */ { DPU_LAYER_CONV3X3,      256, 512,  1,  1,  1,  1, 1, 655 },
+    /* 29 */ { DPU_LAYER_CONV1X1_LIN,  512, 255,  1,  1,  1,  1, 1, 655 }, /* Det head 1 */
+    /* 30 */ { DPU_LAYER_ROUTE_SAVE,   256, 256,  1,  1,  1,  1, 1, 655 },
+    /* 31 */ { DPU_LAYER_CONV1X1,      256, 128,  1,  1,  1,  1, 1, 655 },
+    /* 32 */ { DPU_LAYER_UPSAMPLE,     128, 128,  1,  1,  2,  2, 1, 655 },
+    /* 33 */ { DPU_LAYER_ROUTE_CONCAT, 128, 384,  2,  2,  2,  2, 1, 655 },
+    /* 34 */ { DPU_LAYER_CONV3X3,      384, 256,  2,  2,  2,  2, 1, 655 },
+    /* 35 */ { DPU_LAYER_CONV1X1_LIN,  256, 255,  2,  2,  2,  2, 1, 655 }, /* Det head 2 */
 };
 
 /* --------------------------------------------------------------------------
@@ -35,7 +65,11 @@ static const dpu_layer_desc_t yolov4_tiny_layers[DPU_NUM_LAYERS] = {
 void dpu_driver_init(dpu_driver_t *drv, uintptr_t base)
 {
     dpu_hal_init(&drv->hal, base);
-    memcpy(drv->layers, yolov4_tiny_layers, sizeof(yolov4_tiny_layers));
+    memcpy(drv->layers, yolov4_tiny_36layer, sizeof(yolov4_tiny_36layer));
+
+    /* Detection heads */
+    drv->det_heads[0] = (dpu_detection_head_t){ 29, 255, 1, 1 };
+    drv->det_heads[1] = (dpu_detection_head_t){ 35, 255, 2, 2 };
 
     /* Compute weight/bias offsets per layer */
     uint32_t w_off = 0;
@@ -45,16 +79,16 @@ void dpu_driver_init(dpu_driver_t *drv, uintptr_t base)
         drv->bias_offsets[i]   = b_off;
 
         uint8_t type = drv->layers[i].type;
-        if (type == 0) {
-            /* Conv3x3: c_out * 9 * c_in weights, c_out biases */
-            drv->weight_sizes[i] = drv->layers[i].c_out * 9 * drv->layers[i].c_in;
-            drv->bias_sizes[i]   = drv->layers[i].c_out;
-        } else if (type == 1) {
-            /* Conv1x1: c_out * c_in weights, c_out biases */
-            drv->weight_sizes[i] = drv->layers[i].c_out * drv->layers[i].c_in;
-            drv->bias_sizes[i]   = drv->layers[i].c_out;
+        uint32_t cin  = drv->layers[i].c_in;
+        uint32_t cout = drv->layers[i].c_out;
+
+        if (type == DPU_LAYER_CONV3X3) {
+            drv->weight_sizes[i] = cout * 9 * cin;
+            drv->bias_sizes[i]   = cout;
+        } else if (type == DPU_LAYER_CONV1X1 || type == DPU_LAYER_CONV1X1_LIN) {
+            drv->weight_sizes[i] = cout * cin;
+            drv->bias_sizes[i]   = cout;
         } else {
-            /* Route/MaxPool: no weights */
             drv->weight_sizes[i] = 0;
             drv->bias_sizes[i]   = 0;
         }
@@ -139,7 +173,7 @@ void dpu_driver_load_input(dpu_driver_t *drv,
 }
 
 /* --------------------------------------------------------------------------
- * Run full inference
+ * Run full inference (36 layers with reload support)
  * -------------------------------------------------------------------------- */
 uint32_t dpu_driver_run_inference(dpu_driver_t *drv)
 {
@@ -155,8 +189,7 @@ uint32_t dpu_driver_run_inference(dpu_driver_t *drv)
 
         if (status & DPU_STATUS_RELOAD_REQ) {
             /* DPU paused before a conv layer needing weights.
-             * In a real system, reload weights for the current layer.
-             * For now, weights are pre-loaded; just issue continue (run_layer). */
+             * Weights are pre-loaded in weight_buf; just continue. */
             dpu_hal_pio_cmd(&drv->hal, DPU_CMD_RUN_LAYER, 0, 0);
         }
     }

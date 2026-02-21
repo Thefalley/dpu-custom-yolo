@@ -34,7 +34,7 @@
 /* STATUS register bit fields */
 #define DPU_STATUS_BUSY         (1 << 0)
 #define DPU_STATUS_DONE         (1 << 1)
-#define DPU_STATUS_LAYER_MASK   (0x1F << 8)
+#define DPU_STATUS_LAYER_MASK   (0x3F << 8)
 #define DPU_STATUS_LAYER_SHIFT  8
 #define DPU_STATUS_RELOAD_REQ   (1 << 16)
 #define DPU_STATUS_CMD_READY    (1 << 17)
@@ -59,12 +59,12 @@
 #define DPU_DMA_TARGET_SCALE    3
 #define DPU_DMA_TARGET_LDESC    4
 
-/* Memory layout constants */
-#define DPU_WEIGHT_BUF_SIZE     147456
-#define DPU_BIAS_BUF_OFFSET     147456
-#define DPU_BIAS_BUF_SIZE       1024    /* 256 x 4 bytes */
+/* Memory layout constants — 36-layer YOLOv4-tiny */
+#define DPU_WEIGHT_BUF_SIZE     2400000
+#define DPU_BIAS_BUF_OFFSET     2400000
+#define DPU_BIAS_BUF_SIZE       2048    /* 512 x 4 bytes */
 #define DPU_FMAP_SIZE           65536
-#define DPU_NUM_LAYERS          18
+#define DPU_NUM_LAYERS          36
 
 /* --------------------------------------------------------------------------
  * Platform abstraction
