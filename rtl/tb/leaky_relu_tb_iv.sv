@@ -32,7 +32,7 @@ module leaky_relu_tb;
         rst_n = 0; valid = 0; x = 0;
         repeat(2) @(posedge clk); rst_n <= 1; repeat(1) @(posedge clk);
         $display("=== LeakyReLU (Icarus-compatible) ===");
-        run_relu(-32'sd80); check_relu(-32'sd10);
+        run_relu(-32'sd80); check_relu(-32'sd7);  // (-80>>>3)-(-80>>>5) = -10-(-3) = -7
         run_relu(32'sd40);  check_relu(32'sd40);
         run_relu(32'sd0);   check_relu(32'sd0);
         $display("TOTAL: %0d PASS, %0d FAIL", pass_count, fail_count);

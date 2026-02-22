@@ -41,9 +41,14 @@ TEST_IMAGES = [
 ]
 
 EDGE_CASES = [
-    "all_zeros",       # All-zero input
-    "all_max",         # All 127 (max INT8)
-    "checkerboard",    # Alternating +50/-50
+    "all_zeros",       # All-zero input (forces large scales >= 32768)
+    "all_max",         # All 127 (max INT8, saturated input)
+    "checkerboard",    # Alternating +50/-50 (spatial pattern)
+    "all_neg",         # All -128 (min INT8, tests LeakyReLU heavily)
+    "single_pixel",    # Only one pixel non-zero (sparse input)
+    "noise_uniform",   # Random uniform noise (fuzz test)
+    "gradient_h",      # Horizontal gradient -128..127
+    "stripe_v",        # Vertical stripes +127/-128
 ]
 
 
@@ -59,6 +64,26 @@ def generate_edge_case_image(case_name, out_path):
             for h in range(H0):
                 for w in range(W0):
                     img[c, h, w] = 50 if (h + w) % 2 == 0 else -50
+    elif case_name == "all_neg":
+        img = np.full((3, H0, W0), -128, dtype=np.int8)
+    elif case_name == "single_pixel":
+        img = np.zeros((3, H0, W0), dtype=np.int8)
+        img[0, H0//2, W0//2] = 127  # Single bright pixel in channel 0
+        img[1, H0//2, W0//2] = -128  # Min value in channel 1
+        img[2, H0//2, W0//2] = 64   # Mid value in channel 2
+    elif case_name == "noise_uniform":
+        rng = np.random.RandomState(12345)
+        img = rng.randint(-128, 128, (3, H0, W0), dtype=np.int8)
+    elif case_name == "gradient_h":
+        img = np.zeros((3, H0, W0), dtype=np.int8)
+        for w in range(W0):
+            val = int(-128 + 255 * w / (W0 - 1))
+            val = max(-128, min(127, val))
+            img[:, :, w] = val
+    elif case_name == "stripe_v":
+        img = np.zeros((3, H0, W0), dtype=np.int8)
+        for h in range(H0):
+            img[:, h, :] = 127 if h % 2 == 0 else -128
     else:
         raise ValueError(f"Unknown edge case: {case_name}")
 

@@ -15,12 +15,14 @@ module requantize #(
     output logic        done
 );
 
-    // acc (32b) * scale (16b) -> 48b product; shift right SCALE_Q for fixed-point
+    // acc (32b signed) * scale (16b unsigned) -> 48b product; shift right SCALE_Q
+    // NOTE: scale is UNSIGNED. We prepend a 0 bit so $signed() sees it as positive.
+    // Without this, scales >= 32768 (0x8000) would be misinterpreted as negative.
     logic signed [47:0] product48;
     logic signed [31:0] rounded;
     logic signed [7:0]  clamped;
 
-    assign product48 = acc * $signed(scale);
+    assign product48 = acc * $signed({1'b0, scale});
     assign rounded   = product48 >>> SCALE_Q;
     // Clamp to INT8 range
     assign clamped = (rounded > 32'sd127)  ? 8'sd127 :

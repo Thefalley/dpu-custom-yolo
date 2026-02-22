@@ -126,14 +126,14 @@ module dpu_top_36layer_tb;
         layer_sizes[26] = 512 * (H0/32)  * (W0/32);     // 512*1*1
         layer_sizes[27] = 256 * (H0/32)  * (W0/32);     // 256*1*1  = 256
         layer_sizes[28] = 512 * (H0/32)  * (W0/32);     // 512*1*1
-        layer_sizes[29] = 255 * (H0/32)  * (W0/32);     // 255*1*1  = 255
+        layer_sizes[29] = 255 * (H0/32)  * (W0/32) * 4;  // 255*1*1 * 4 bytes (INT32)
         // Bridge + detection head 2
         layer_sizes[30] = 256 * (H0/32)  * (W0/32);     // 256*1*1  = 256
         layer_sizes[31] = 128 * (H0/32)  * (W0/32);     // 128*1*1  = 128
         layer_sizes[32] = 128 * (H0/16)  * (W0/16);     // 128*2*2  = 512
         layer_sizes[33] = 384 * (H0/16)  * (W0/16);     // 384*2*2  = 1536
         layer_sizes[34] = 256 * (H0/16)  * (W0/16);     // 256*2*2  = 1024
-        layer_sizes[35] = 255 * (H0/16)  * (W0/16);     // 255*2*2  = 1020
+        layer_sizes[35] = 255 * (H0/16)  * (W0/16) * 4;  // 255*2*2 * 4 bytes (INT32)
     end
 
     // ---- Bias packing: 4 LE bytes -> 32-bit signed ----
@@ -300,13 +300,13 @@ module dpu_top_36layer_tb;
                 26: $readmemh("image_sim_out/dpu_top_37/layer26_expected.hex", exp_buf);
                 27: $readmemh("image_sim_out/dpu_top_37/layer27_expected.hex", exp_buf);
                 28: $readmemh("image_sim_out/dpu_top_37/layer28_expected.hex", exp_buf);
-                29: $readmemh("image_sim_out/dpu_top_37/layer29_expected.hex", exp_buf);
+                29: $readmemh("image_sim_out/dpu_top_37/layer29_expected_int32.hex", exp_buf);
                 30: $readmemh("image_sim_out/dpu_top_37/layer30_expected.hex", exp_buf);
                 31: $readmemh("image_sim_out/dpu_top_37/layer31_expected.hex", exp_buf);
                 32: $readmemh("image_sim_out/dpu_top_37/layer32_expected.hex", exp_buf);
                 33: $readmemh("image_sim_out/dpu_top_37/layer33_expected.hex", exp_buf);
                 34: $readmemh("image_sim_out/dpu_top_37/layer34_expected.hex", exp_buf);
-                35: $readmemh("image_sim_out/dpu_top_37/layer35_expected.hex", exp_buf);
+                35: $readmemh("image_sim_out/dpu_top_37/layer35_expected_int32.hex", exp_buf);
             endcase
 
             // Compare: after S_LAYER_DONE, pp is TOGGLED.
@@ -333,6 +333,28 @@ module dpu_top_36layer_tb;
             else begin
                 $display("  Layer %2d: FAIL  (%0d errors / %0d bytes)", lidx, errcnt, sz);
                 total_layer_fails = total_layer_fails + 1;
+            end
+
+            // Export RTL output for detection layers (29, 35) to hex files
+            // These layers output INT32 (4 bytes per element in fmap)
+            if (lidx == 29 || lidx == 35) begin : export_rtl_output
+                integer fd, ei;
+                reg [7:0] rv;
+                if (lidx == 29)
+                    fd = $fopen("image_sim_out/dpu_top_37/rtl_output_layer29.hex", "w");
+                else
+                    fd = $fopen("image_sim_out/dpu_top_37/rtl_output_layer35.hex", "w");
+                if (fd != 0) begin
+                    for (ei = 0; ei < sz; ei = ei + 1) begin
+                        if (pp_new == 1'b1)
+                            rv = u_dut.fmap_b[ei];
+                        else
+                            rv = u_dut.fmap_a[ei];
+                        $fwrite(fd, "%02x\n", rv & 8'hff);
+                    end
+                    $fclose(fd);
+                    $display("  -> RTL output exported: rtl_output_layer%0d.hex (%0d bytes, INT32)", lidx, sz);
+                end
             end
         end
     endtask

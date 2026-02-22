@@ -189,18 +189,18 @@ def conv2d_1x1(
 
 def leaky_relu(
     x: np.ndarray,              # INT32 input
-    alpha_shift: int = 3,       # Right shift for alpha approximation (1/8)
+    alpha_shift: int = 3,       # Right shift for alpha approximation
     use_exact: bool = False,    # Use exact 0.1 or shift approximation
     alpha: float = 0.1
 ) -> np.ndarray:                # INT32 output
     """
     LeakyReLU activation: y = x if x > 0 else alpha * x
 
-    For hardware, we approximate alpha=0.1 as 1/8 using right shift by 3.
+    For hardware, we approximate alpha=0.1 as 3/32 using (x>>3)-(x>>5).
 
     Args:
         x: Input values (INT32)
-        alpha_shift: Right shift amount for approximation (3 -> 1/8)
+        alpha_shift: Right shift amount (unused, kept for API compat)
         use_exact: If True, use exact alpha multiplication
         alpha: Exact alpha value (only used if use_exact=True)
 
@@ -211,9 +211,9 @@ def leaky_relu(
         # Exact computation (for reference)
         negative_part = (x * alpha).astype(np.int32)
     else:
-        # Hardware approximation: x >> 3 (divide by 8)
-        # Arithmetic right shift preserves sign
-        negative_part = x >> alpha_shift
+        # Hardware approximation: (x>>3) - (x>>5) = x * 3/32 = 0.09375
+        x32 = x.astype(np.int32)
+        negative_part = (x32 >> 3) - (x32 >> 5)
 
     # Select: x if x > 0 else negative_part
     output = np.where(x > 0, x, negative_part)
@@ -225,11 +225,13 @@ def leaky_relu_hardware(x: np.ndarray) -> np.ndarray:
     """
     Hardware-accurate LeakyReLU using shift instead of multiply.
     This exactly matches what the RTL will do.
+    Alpha = 3/32 = 0.09375 (closer to true 0.1 than old 1/8 = 0.125).
     """
-    # Arithmetic right shift by 3 (equivalent to divide by 8, preserving sign)
-    negative_scaled = np.right_shift(x.astype(np.int32), 3)
+    x32 = x.astype(np.int32)
+    # (x >> 3) - (x >> 5) = x * (1/8 - 1/32) = x * 3/32
+    negative_scaled = np.right_shift(x32, 3) - np.right_shift(x32, 5)
     # MUX: select based on sign
-    return np.where(x > 0, x, negative_scaled).astype(np.int32)
+    return np.where(x32 > 0, x32, negative_scaled).astype(np.int32)
 
 
 # =============================================================================
@@ -466,8 +468,11 @@ def validate_leaky_relu():
     # Hardware version (shift by 3)
     y_hw = leaky_relu_hardware(x)
 
-    # Expected: positive values unchanged, negative divided by 8
-    expected = np.array([-10, -5, -1, 0, 8, 40, 80], dtype=np.int32)
+    # Expected: positive values unchanged, negative * 3/32 via (x>>3)-(x>>5)
+    # -80: (-80>>3)-(-80>>5) = -10-(-3) = -7
+    # -40: (-40>>3)-(-40>>5) = -5-(-2) = -3
+    # -8:  (-8>>3)-(-8>>5)   = -1-(-1) = 0
+    expected = np.array([-7, -3, 0, 0, 8, 40, 80], dtype=np.int32)
 
     print(f"  Input:    {x}")
     print(f"  Output:   {y_hw}")

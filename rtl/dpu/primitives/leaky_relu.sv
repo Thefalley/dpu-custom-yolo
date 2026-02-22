@@ -1,5 +1,5 @@
-// DPU Primitive: LeakyReLU (hardware approximation alpha = 1/8)
-// Phase 6 - Maps to Python leaky_relu_hardware(x): x>0 ? x : (x>>3)
+// DPU Primitive: LeakyReLU (hardware approximation alpha = 3/32 = 0.09375)
+// Phase 6 - Maps to Python leaky_relu_hardware(x): x>0 ? x : (x>>3)-(x>>5)
 // INT32 in -> INT32 out
 `default_nettype none
 
@@ -12,11 +12,11 @@ module leaky_relu (
     output logic        done
 );
 
-    logic signed [31:0] x_shifted;  // x >>> 3 (arithmetic right shift)
+    logic signed [31:0] x_shifted;  // (x>>>3) - (x>>>5) = x * 3/32
     logic signed [31:0] y_comb;
 
-    assign x_shifted = x >>> 3;
-    assign y_comb    = (x[31] == 1'b0) ? x : x_shifted;  // x>=0 -> x, else x/8
+    assign x_shifted = (x >>> 3) - (x >>> 5);
+    assign y_comb    = (x[31] == 1'b0) ? x : x_shifted;  // x>=0 -> x, else x*3/32
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

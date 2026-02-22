@@ -251,12 +251,18 @@ module dpu_top #(
     logic [5:0]  eng_out_count;
     wire [255:0] eng_out_data_flat;
 
+    // INT32 output from engine (pre-requant, for detection layers)
+    wire [1023:0] eng_out_int32_flat;
+
     // Unpack engine output from flat vector into local reg array
     reg signed [7:0] eng_out_data [0:31];
+    reg signed [31:0] eng_out_int32 [0:31];
     integer unpack_i;
-    always @(eng_out_data_flat) begin
-        for (unpack_i = 0; unpack_i < 32; unpack_i = unpack_i + 1)
+    always @(eng_out_data_flat or eng_out_int32_flat) begin
+        for (unpack_i = 0; unpack_i < 32; unpack_i = unpack_i + 1) begin
             eng_out_data[unpack_i] = $signed(eng_out_data_flat[unpack_i*8 +: 8]);
+            eng_out_int32[unpack_i] = $signed(eng_out_int32_flat[unpack_i*32 +: 32]);
+        end
     end
 
     // Latched pulse signals (1-cycle pulses that may arrive while busy)
@@ -287,6 +293,7 @@ module dpu_top #(
         .out_ch_base(eng_out_ch_base),
         .out_count(eng_out_count),
         .out_data_flat(eng_out_data_flat),
+        .out_int32_flat(eng_out_int32_flat),
         .done(eng_done)
     );
 
@@ -366,6 +373,7 @@ module dpu_top #(
     integer batch_idx;
     integer batch_ch_base;
     integer batch_count;
+    integer int32_byte_idx;  // 0..3 for INT32 byte writes (detection layers)
 
     // Temporaries
     integer tmp_ih, tmp_iw, tmp_src_addr, tmp_dst_addr;
@@ -398,7 +406,7 @@ module dpu_top #(
             copy_idx <= 0; save_idx <= 0;
             copy_total <= 0;
             pool_ch <= 0; pool_oh <= 0; pool_ow <= 0;
-            batch_idx <= 0; batch_ch_base <= 0; batch_count <= 0;
+            batch_idx <= 0; batch_ch_base <= 0; batch_count <= 0; int32_byte_idx <= 0;
             cur_kernel_size <= 4'd3;
             eng_done_latched <= 1'b0;
             eng_skip_relu <= 1'b0;
@@ -627,29 +635,53 @@ module dpu_top #(
                 // =============================================================
                 S_CONV_ENGINE: begin
                     if (eng_out_valid) begin
-                        batch_ch_base <= eng_out_ch_base;
-                        batch_count   <= eng_out_count;
-                        batch_idx     <= 0;
-                        state         <= S_CONV_WRITE_BATCH;
+                        batch_ch_base  <= eng_out_ch_base;
+                        batch_count    <= eng_out_count;
+                        batch_idx      <= 0;
+                        int32_byte_idx <= 0;
+                        state          <= S_CONV_WRITE_BATCH;
                     end
                 end
 
                 // =============================================================
                 // CONV: Write batch of results to output fmap
                 // eng_out_data[] holds values until next S_OUTPUT in engine
+                // For LT_CONV1X1_LIN (detection layers 29,35): write 4 bytes LE per channel
                 // =============================================================
                 S_CONV_WRITE_BATCH: begin
-                    out_addr = (batch_ch_base + batch_idx) * cur_h_out * cur_w_out
-                             + oh * cur_w_out + ow;
-                    if (ping_pong == 1'b0)
-                        fmap_b[out_addr] <= eng_out_data[batch_idx];
-                    else
-                        fmap_a[out_addr] <= eng_out_data[batch_idx];
+                    if (cur_type == LT_CONV1X1_LIN) begin
+                        // INT32 write: 4 bytes per channel, little-endian
+                        out_addr = ((batch_ch_base + batch_idx) * cur_h_out * cur_w_out
+                                   + oh * cur_w_out + ow) * 4 + int32_byte_idx;
+                        if (ping_pong == 1'b0)
+                            fmap_b[out_addr] <= eng_out_int32[batch_idx][(int32_byte_idx*8) +: 8];
+                        else
+                            fmap_a[out_addr] <= eng_out_int32[batch_idx][(int32_byte_idx*8) +: 8];
 
-                    if (batch_idx + 1 >= batch_count) begin
-                        state <= S_CONV_NEXT_PIXEL;
+                        if (int32_byte_idx == 3) begin
+                            int32_byte_idx <= 0;
+                            if (batch_idx + 1 >= batch_count) begin
+                                state <= S_CONV_NEXT_PIXEL;
+                            end else begin
+                                batch_idx <= batch_idx + 1;
+                            end
+                        end else begin
+                            int32_byte_idx <= int32_byte_idx + 1;
+                        end
                     end else begin
-                        batch_idx <= batch_idx + 1;
+                        // INT8 write: 1 byte per channel (backbone layers)
+                        out_addr = (batch_ch_base + batch_idx) * cur_h_out * cur_w_out
+                                 + oh * cur_w_out + ow;
+                        if (ping_pong == 1'b0)
+                            fmap_b[out_addr] <= eng_out_data[batch_idx];
+                        else
+                            fmap_a[out_addr] <= eng_out_data[batch_idx];
+
+                        if (batch_idx + 1 >= batch_count) begin
+                            state <= S_CONV_NEXT_PIXEL;
+                        end else begin
+                            batch_idx <= batch_idx + 1;
+                        end
                     end
                 end
 
@@ -676,10 +708,11 @@ module dpu_top #(
                         end
                     end else if (eng_out_valid) begin
                         // Another batch of results
-                        batch_ch_base <= eng_out_ch_base;
-                        batch_count   <= eng_out_count;
-                        batch_idx     <= 0;
-                        state         <= S_CONV_WRITE_BATCH;
+                        batch_ch_base  <= eng_out_ch_base;
+                        batch_count    <= eng_out_count;
+                        batch_idx      <= 0;
+                        int32_byte_idx <= 0;
+                        state          <= S_CONV_WRITE_BATCH;
                     end
                 end
 

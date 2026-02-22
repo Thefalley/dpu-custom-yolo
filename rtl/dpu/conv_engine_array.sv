@@ -48,6 +48,7 @@ module conv_engine_array #(
     output logic [8:0]  out_ch_base,
     output logic [5:0]  out_count,       // valid channels (1..32)
     output wire  [255:0] out_data_flat,  // packed: [i*8+:8] = out_data[i]
+    output wire  [1023:0] out_int32_flat, // packed: [i*32+:32] = INT32 pre-requant
     output logic        done
 );
 
@@ -80,26 +81,32 @@ module conv_engine_array #(
     // =========================================================================
     logic        pp_valid, pp_done;
     wire [255:0] pp_result_flat;
+    wire [1023:0] pp_result_int32_flat;
 
     post_process_array #(.LANES(32), .SCALE_Q(SCALE_Q)) u_post (
         .clk(clk), .rst_n(rst_n),
         .valid(pp_valid),
         .acc_in(arr_acc), .bias(bias_reg), .scale(scale),
         .skip_relu(skip_relu),
-        .result_flat(pp_result_flat), .done(pp_done)
+        .result_flat(pp_result_flat),
+        .result_int32_flat(pp_result_int32_flat),
+        .done(pp_done)
     );
 
     // Unpack post-process result into local regs
     reg signed [7:0] pp_result [0:31];
+    reg signed [31:0] pp_result_int32 [0:31];
 
     // Output data registers (packed for dpu_top)
     reg signed [7:0] out_data_int [0:31];
+    reg signed [31:0] out_data_int32 [0:31];
 
-    // Pack output data as flat vector
+    // Pack output data as flat vectors
     genvar gk;
     generate
         for (gk = 0; gk < 32; gk = gk + 1) begin : gen_out_pack
             assign out_data_flat[gk*8 +: 8] = out_data_int[gk];
+            assign out_int32_flat[gk*32 +: 32] = out_data_int32[gk];
         end
     endgenerate
 
@@ -163,9 +170,11 @@ module conv_engine_array #(
             first_mac <= 1'b0;
             ld_r <= 0; ld_b <= 0;
             for (ii = 0; ii < 32; ii = ii + 1) begin
-                arr_acc[ii]      <= 32'sd0;
-                pp_result[ii]    <= 8'sd0;
-                out_data_int[ii] <= 8'sd0;
+                arr_acc[ii]          <= 32'sd0;
+                pp_result[ii]        <= 8'sd0;
+                pp_result_int32[ii]  <= 32'sd0;
+                out_data_int[ii]     <= 8'sd0;
+                out_data_int32[ii]   <= 32'sd0;
             end
         end else begin
             arr_valid <= 1'b0;
@@ -324,9 +333,11 @@ module conv_engine_array #(
 
                 S_PP_WAIT: begin
                     if (pp_done) begin
-                        // Capture post-process results from packed wire
-                        for (ii = 0; ii < 32; ii = ii + 1)
+                        // Capture post-process results from packed wires
+                        for (ii = 0; ii < 32; ii = ii + 1) begin
                             pp_result[ii] <= $signed(pp_result_flat[ii*8 +: 8]);
+                            pp_result_int32[ii] <= $signed(pp_result_int32_flat[ii*32 +: 32]);
+                        end
                         state <= S_OUTPUT;
                     end
                 end
@@ -336,8 +347,10 @@ module conv_engine_array #(
                     out_valid   <= 1'b1;
                     out_ch_base <= cout_base[8:0];
                     out_count   <= active_rows[5:0];
-                    for (ii = 0; ii < 32; ii = ii + 1)
-                        out_data_int[ii] <= pp_result[ii];
+                    for (ii = 0; ii < 32; ii = ii + 1) begin
+                        out_data_int[ii]   <= pp_result[ii];
+                        out_data_int32[ii] <= pp_result_int32[ii];
+                    end
 
                     // Next Cout tile?
                     if (cout_base + 32 < c_out) begin

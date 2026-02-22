@@ -149,6 +149,7 @@ module dpu_axi_dma #(
                         // Need new word from S_AXIS
                         s_axis_tready <= 1'b1;
                         if (s_axis_tvalid && s_axis_tready) begin
+                            s_axis_tready  <= 1'b0;  // deassert after accept
                             axis_buf       <= s_axis_tdata;
                             axis_buf_valid <= 1'b1;
                             word_byte      <= 2'd0;

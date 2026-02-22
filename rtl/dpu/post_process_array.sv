@@ -2,7 +2,7 @@
 // Matches existing primitives (leaky_relu.sv, requantize.sv) bit-exactly.
 // Pipeline: 3 registered stages.
 //   Stage 1: biased = acc_in + bias
-//   Stage 2: relu   = biased >= 0 ? biased : (biased >>> 3)
+//   Stage 2: relu   = biased >= 0 ? biased : ((biased >>> 3) - (biased >>> 5))
 //   Stage 3: quant  = clamp((relu * scale) >>> SCALE_Q, -128, 127)
 //
 // NOTE: result output uses a packed flat vector because Icarus Verilog
@@ -21,6 +21,7 @@ module post_process_array #(
     input  logic [15:0]        scale,
     input  logic               skip_relu,      // 1 = LINEAR (bypass LeakyReLU)
     output wire  [LANES*8-1:0] result_flat,    // packed: [i*8+:8] = result[i]
+    output wire  [LANES*32-1:0] result_int32_flat, // packed: [i*32+:32] = relu_r[i] (pre-requant)
     output reg                 done
 );
 
@@ -44,13 +45,15 @@ module post_process_array #(
     genvar gi;
     generate
         for (gi = 0; gi < LANES; gi = gi + 1) begin : gen_pp
-            assign prod_w[gi]  = relu_r[gi] * $signed(scale);
+            assign prod_w[gi]  = relu_r[gi] * $signed({1'b0, scale});
             assign rnd_w[gi]   = prod_w[gi] >>> SCALE_Q;
             assign clamp_w[gi] = (rnd_w[gi] > 32'sd127)  ? 8'sd127  :
                                  (rnd_w[gi] < -32'sd128) ? -8'sd128 :
                                  rnd_w[gi][7:0];
             // Pack result as flat vector
             assign result_flat[gi*8 +: 8] = result_int[gi];
+            // Pack INT32 pre-requant output (Stage 2 relu_r)
+            assign result_int32_flat[gi*32 +: 32] = relu_r[gi];
         end
     endgenerate
 
@@ -84,7 +87,7 @@ module post_process_array #(
             if (v1) begin
                 for (i = 0; i < LANES; i = i + 1)
                     relu_r[i] <= skip_relu ? biased_r[i] :
-                                 ((biased_r[i][31] == 1'b0) ? biased_r[i] : (biased_r[i] >>> 3));
+                                 ((biased_r[i][31] == 1'b0) ? biased_r[i] : ((biased_r[i] >>> 3) - (biased_r[i] >>> 5)));
             end
 
             // Stage 3: Requantize (combinational via assign, latch result)

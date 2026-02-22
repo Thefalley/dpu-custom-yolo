@@ -133,7 +133,8 @@ def conv_linear_hw(input_fm, weights, bias, scale=SCALE_RTL):
 
 def calibrate_scale(input_fm, weights, bias, stride=1, kernel_size=3,
                     linear=False):
-    """Compute optimal requant scale for a conv layer by examining accumulator range."""
+    """Compute optimal requant scale for a conv layer by examining accumulator range.
+    Uses 99.99th percentile instead of max to reduce outlier impact."""
     if kernel_size == 3:
         conv_out = conv2d_3x3(input_fm, weights, bias, stride=stride)
     else:
@@ -145,13 +146,16 @@ def calibrate_scale(input_fm, weights, bias, stride=1, kernel_size=3,
         # Linear activation: no LeakyReLU, use raw conv output
         relu_out = conv_out
 
-    max_abs = int(np.max(np.abs(relu_out)))
-    if max_abs == 0:
+    abs_vals = np.abs(relu_out)
+    p9999 = float(np.percentile(abs_vals, 99.99))
+    if p9999 == 0:
+        p9999 = float(np.max(abs_vals))  # fallback
+    if p9999 == 0:
         return SCALE_RTL
-    # Scale to map max_abs -> 127 in INT8: out = (relu * scale) >> 16
-    # We want: max_abs * scale >> 16 = 127
-    # scale = 127 * 2^16 / max_abs
-    scale = int(127 * (1 << SHIFT_RTL) / max_abs)
+    # Scale to map p9999 -> 127 in INT8: out = (relu * scale) >> 16
+    # We want: p9999 * scale >> 16 = 127
+    # scale = 127 * 2^16 / p9999
+    scale = int(127 * (1 << SHIFT_RTL) / p9999)
     scale = max(1, min(scale, 65535))
     return scale
 
@@ -170,6 +174,17 @@ def write_bias_hex(path, bias_array):
     with open(path, 'w') as f:
         for b in bias_array:
             val = int(b) & 0xffffffff
+            f.write(f"{(val >> 0) & 0xff:02x}\n")
+            f.write(f"{(val >> 8) & 0xff:02x}\n")
+            f.write(f"{(val >> 16) & 0xff:02x}\n")
+            f.write(f"{(val >> 24) & 0xff:02x}\n")
+
+
+def write_int32_hex_file(path, data_flat):
+    """Write INT32 array as hex, 4 bytes little-endian per value."""
+    with open(path, 'w') as f:
+        for v in data_flat:
+            val = int(v) & 0xffffffff
             f.write(f"{(val >> 0) & 0xff:02x}\n")
             f.write(f"{(val >> 8) & 0xff:02x}\n")
             f.write(f"{(val >> 16) & 0xff:02x}\n")
@@ -209,9 +224,9 @@ def load_input_image(image_path):
     img = Image.open(image_path).convert('RGB')
     img = img.resize((W0, H0), Image.BILINEAR)
     arr = np.array(img, dtype=np.float32)  # HWC, 0-255
-    # YOLOv4-tiny normalizes to [0,1] then processes; we map to signed INT8 [-128,127]
-    # Center around 0: pixel_int8 = round(pixel / 255 * 254 - 127)
-    arr = np.round(arr / 255.0 * 254.0 - 127.0)
+    # Symmetric INT8 quantization: x_float = pixel/255 in [0,1], x_int8 = round(x_float * 127)
+    # x_scale = 1/127 (one INT8 unit = 1/127 in float)
+    arr = np.round(arr / 255.0 * 127.0)
     arr = np.clip(arr, -128, 127).astype(np.int8)
     # HWC -> CHW
     arr = arr.transpose(2, 0, 1)
@@ -321,7 +336,10 @@ def main():
                 layer_scales[i] = calibrate_scale(current_fmap, weights[i], biases[i],
                                                   stride=1, kernel_size=1, linear=True)
             conv_out = conv2d_1x1(current_fmap, weights[i], biases[i])
-            # NO LeakyReLU — go directly to requantize
+            # Export INT32 (pre-requant) for detection layers — RTL outputs INT32 for these
+            write_int32_hex_file(out_dir / f"layer{i}_expected_int32.hex",
+                                 conv_out.flatten())
+            # Also export requantized INT8 for backward compatibility
             out = requantize_fixed_point(conv_out, np.int32(layer_scales[i]), SHIFT_RTL)
             export_conv_weights(out_dir, i, ltype, weights[i], biases[i],
                                 c_in, c_out, kernel)

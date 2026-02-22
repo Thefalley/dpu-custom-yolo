@@ -84,8 +84,8 @@ def conv2d_int8(x, weight, bias, stride=1, pad=0):
 
 
 def leaky_relu_int8(x):
-    """Leaky ReLU: x >= 0 ? x : x >> 3 (matches DPU hardware)."""
-    return np.where(x >= 0, x, x >> 3)
+    """Leaky ReLU: x >= 0 ? x : (x>>3)-(x>>5) (matches DPU hardware, alpha=3/32)."""
+    return np.where(x >= 0, x, (x >> 3) - (x >> 5))
 
 
 def requantize(x, scale=655):
@@ -214,7 +214,7 @@ def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
-def decode_yolo(raw_tensor, anchors, num_classes, input_size):
+def decode_yolo(raw_tensor, anchors, num_classes, input_size, pre_scaled=False):
     """
     Decode a single YOLO detection tensor.
 
@@ -236,9 +236,9 @@ def decode_yolo(raw_tensor, anchors, num_classes, input_size):
     pred = raw_tensor.reshape(num_anchors, 5 + num_classes, grid_h, grid_w)
     pred = pred.astype(np.float64)
 
-    # Scale raw INT32 values to reasonable range for sigmoid
-    # (In a real system, the detection head outputs would be properly scaled)
-    pred = pred / 256.0
+    # Scale raw values to reasonable range for sigmoid
+    if not pre_scaled:
+        pred = pred / 256.0
 
     # Grid offsets
     grid_y, grid_x = np.meshgrid(np.arange(grid_h), np.arange(grid_w), indexing='ij')
